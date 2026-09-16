@@ -7,12 +7,14 @@
 //!   X11:     use xcap for monitor enumeration and capture.
 
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use xcap::Monitor;
 
-use crate::capture::host_command;
 use crate::capture::has_binary;
-use crate::utils::{ensure_dir, generate_filename, generate_filename_with_id, AppResult};
+use crate::capture::host_command;
+use crate::utils::{
+    app_temp_dir, ensure_dir, generate_filename, generate_filename_with_id, AppResult,
+};
 
 /// Check if we're on Wayland
 fn is_wayland() -> bool {
@@ -59,7 +61,7 @@ pub fn capture_all_monitors(save_dir: &str) -> AppResult<Vec<MonitorShot>> {
 
 /// Wayland: enumerate outputs with `wlr-randr` or `wayland-info`, then grim -o <output>
 /// Falls back to a single grim capture if output enumeration is unavailable.
-fn capture_all_monitors_wayland(save_path: &PathBuf) -> AppResult<Vec<MonitorShot>> {
+fn capture_all_monitors_wayland(save_path: &Path) -> AppResult<Vec<MonitorShot>> {
     if !has_binary("grim") {
         return Err("grim not found. Install grim for Wayland screen capture.".into());
     }
@@ -206,7 +208,7 @@ fn get_wayland_outputs() -> Vec<String> {
 }
 
 /// Capture a single monitor using xcap (X11 only)
-fn capture_single_monitor_xcap(monitor: &Monitor, save_path: &PathBuf) -> AppResult<MonitorShot> {
+fn capture_single_monitor_xcap(monitor: &Monitor, save_path: &Path) -> AppResult<MonitorShot> {
     let monitor_id = monitor
         .id()
         .map_err(|e| format!("Failed to get monitor id: {}", e))?;
@@ -249,43 +251,73 @@ fn capture_single_monitor_xcap(monitor: &Monitor, save_path: &PathBuf) -> AppRes
     })
 }
 
-/// Capture primary monitor.
-/// Uses the cross-desktop fallback chain in capture.rs (cosmic-screenshot,
-/// spectacle, grim, GNOME Shell D-Bus, xdg-desktop-portal, gnome-screenshot,
-/// scrot) and only falls back to xcap on X11 when no native tool exists.
-pub async fn capture_primary_monitor(_app_handle: tauri::AppHandle) -> AppResult<PathBuf> {
-    let temp_dir = std::env::temp_dir();
-    ensure_dir(&temp_dir)?;
+/// Capture the single monitor containing `point` (Windows/macOS only).
+///
+/// Used by the region and OCR-region flows, which then place the selector
+/// overlay over that same monitor via `overlay::place_and_show_selector`. Both
+/// halves are keyed off the same cursor point, so the image the user drags on
+/// always belongs to the display they are dragging on.
+///
+/// `None` falls back to the primary monitor.
+#[cfg(not(target_os = "linux"))]
+pub async fn capture_monitor_at_point(point: Option<(f64, f64)>) -> AppResult<PathBuf> {
+    let temp_dir = app_temp_dir()?;
     let filename = generate_filename("screenshot", "png")?;
     let screenshot_path = temp_dir.join(&filename);
 
-    // Native tool chain — works on every desktop (incl. GNOME/KDE Wayland and Flatpak)
-    if crate::capture::capture_fullscreen(&screenshot_path).is_ok() {
+    crate::xcap_capture::capture_monitor_at_point(point, &screenshot_path)?;
+    Ok(screenshot_path)
+}
+
+/// Windows and macOS: capture the primary monitor directly with xcap.
+/// Linux: uses the cross-desktop fallback chain in capture.rs
+/// (cosmic-screenshot, spectacle, grim, GNOME Shell D-Bus,
+/// xdg-desktop-portal, gnome-screenshot, scrot) and only falls back to xcap on
+/// X11 when no native tool exists.
+pub async fn capture_primary_monitor(_app_handle: tauri::AppHandle) -> AppResult<PathBuf> {
+    let temp_dir = app_temp_dir()?;
+    let filename = generate_filename("screenshot", "png")?;
+    let screenshot_path = temp_dir.join(&filename);
+
+    // Windows and macOS must NOT go through `capture_fullscreen`: there it
+    // stitches every monitor into one virtual-desktop image, which the
+    // single-monitor region-selector overlay would stretch over itself and
+    // thereby break all selection coordinate mapping. Capture the primary
+    // monitor directly.
+    #[cfg(not(target_os = "linux"))]
+    {
+        crate::xcap_capture::capture_primary_monitor(&screenshot_path)?;
         return Ok(screenshot_path);
     }
 
-    // X11 fallback via xcap
-    if !is_wayland() {
-        let monitors = Monitor::all().map_err(|e| format!("Failed to get monitors: {}", e))?;
-        if monitors.is_empty() {
-            return Err("No monitors available".into());
+    #[cfg(target_os = "linux")]
+    {
+        if crate::capture::capture_fullscreen(&screenshot_path).is_ok() {
+            return Ok(screenshot_path);
         }
-        let primary = monitors
-            .iter()
-            .find(|m| m.is_primary().unwrap_or(false))
-            .or_else(|| monitors.first())
-            .ok_or("No monitor found")?;
 
-        let image = primary
-            .capture_image()
-            .map_err(|e| format!("Failed to capture primary monitor: {}", e))?;
+        if !is_wayland() {
+            let monitors = Monitor::all().map_err(|e| format!("Failed to get monitors: {}", e))?;
+            if monitors.is_empty() {
+                return Err("No monitors available".into());
+            }
+            let primary = monitors
+                .iter()
+                .find(|m| m.is_primary().unwrap_or(false))
+                .or_else(|| monitors.first())
+                .ok_or("No monitor found")?;
 
-        image
-            .save(&screenshot_path)
-            .map_err(|e| format!("Failed to save screenshot: {}", e))?;
+            let image = primary
+                .capture_image()
+                .map_err(|e| format!("Failed to capture primary monitor: {}", e))?;
 
-        return Ok(screenshot_path);
+            image
+                .save(&screenshot_path)
+                .map_err(|e| format!("Failed to save screenshot: {}", e))?;
+
+            return Ok(screenshot_path);
+        }
+
+        Err("No supported screen capture method found on this desktop. Install grim, spectacle, cosmic-screenshot, or scrot.".into())
     }
-
-    Err("No supported screen capture method found on this desktop. Install grim, spectacle, cosmic-screenshot, or scrot.".into())
 }

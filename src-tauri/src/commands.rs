@@ -1,19 +1,24 @@
-//! Tauri commands module — Linux implementation
-
 use std::path::PathBuf;
+// `Command`/`Stdio` are needed by the Linux arms (zenity/kdialog/python3,
+// paplay/aplay, xdotool) and by the macOS `afplay` shutter sound. Windows uses
+// no shell-outs (MessageBeep / GetCursorPos / tauri-plugin-dialog), so it is
+// the only target that does not need them.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
-use crate::capture::{
-    capture_fullscreen, capture_region as capture_region_tool, capture_window, has_binary,
-};
+use crate::capture::{capture_fullscreen, capture_window};
+#[cfg(target_os = "linux")]
+use crate::capture::{capture_region as capture_region_tool, has_binary};
 use crate::clipboard::{copy_image_to_clipboard, copy_text_to_clipboard};
 use crate::image::{
     copy_screenshot_to_dir, crop_image, render_image_with_effects, save_base64_image, CropRegion,
     RenderSettings,
 };
 use crate::ocr::recognize_text_from_image;
+#[cfg(not(target_os = "linux"))]
+use crate::screenshot::capture_monitor_at_point;
 use crate::screenshot::{
     capture_all_monitors as capture_monitors, capture_primary_monitor, MonitorShot,
 };
@@ -23,7 +28,7 @@ static PENDING_SCREENSHOT_B64: Mutex<Option<String>> = Mutex::new(None);
 
 static SCREENCAPTURE_LOCK: Mutex<()> = Mutex::new(());
 
-/// Detect whether we're running under Wayland or X11
+#[cfg(target_os = "linux")]
 fn is_wayland() -> bool {
     std::env::var("WAYLAND_DISPLAY").is_ok()
         || std::env::var("XDG_SESSION_TYPE")
@@ -46,7 +51,6 @@ pub async fn copy_image_file_to_clipboard(path: String) -> Result<(), String> {
     .map_err(|e| format!("Task join error: {}", e))?
 }
 
-/// Quick capture of primary monitor
 #[tauri::command]
 pub async fn capture_once(
     app_handle: AppHandle,
@@ -66,7 +70,6 @@ pub async fn capture_once(
     .map_err(|e| format!("Task join error: {}", e))?
 }
 
-/// Capture all monitors with geometry info
 #[tauri::command]
 pub async fn capture_all_monitors(
     _app_handle: AppHandle,
@@ -77,7 +80,6 @@ pub async fn capture_all_monitors(
         .map_err(|e| format!("Task join error: {}", e))?
 }
 
-/// Crop a region from a screenshot
 #[tauri::command]
 pub async fn capture_region(
     screenshot_path: String,
@@ -100,7 +102,6 @@ pub async fn capture_region(
     .map_err(|e| format!("Task join error: {}", e))?
 }
 
-/// Render image with effects using Rust (optimized for blur)
 #[tauri::command]
 pub async fn render_image_with_effects_rust(
     image_path: String,
@@ -135,15 +136,19 @@ pub async fn get_desktop_directory() -> Result<String, String> {
     get_desktop_path()
 }
 
-/// Get the system temp directory path
+/// Get the directory FrameXShot writes temporary captures into.
+///
+/// This is an app-owned subdirectory of the system temp directory, not the
+/// system temp directory itself — see `utils::app_temp_dir` for why.
 #[tauri::command]
 pub async fn get_temp_directory() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        // NOTE: cleanup_temp_files() is intentionally NOT called here.
-        // It was called on every get_temp_directory invocation, which deleted screenshot_*.png
-        // files that were currently open in the editor, causing 404 "Could not load image" errors.
-        // Cleanup now only happens explicitly via cleanup_old_screenshots command.
-        let temp_dir = std::env::temp_dir();
+        // NOTE: cleanup is intentionally NOT run here. It used to be, on every
+        // invocation, which deleted screenshot_*.png files that were currently
+        // open in the editor and produced 404 "Could not load image" errors.
+        // Cleanup now only happens via the explicit `cleanup_old_screenshots`
+        // command, and even then only for files past a minimum age.
+        let temp_dir = crate::utils::app_temp_dir()?;
         // Do NOT canonicalize — canonicalize() on macOS turns /tmp → /private/tmp,
         // which then doesn't match the /tmp/** asset scope and causes 404s in the editor.
         // Return the path as-is so it matches what's in tauri.conf.json scope.
@@ -156,35 +161,99 @@ pub async fn get_temp_directory() -> Result<String, String> {
     .map_err(|e| format!("Task join error: {}", e))?
 }
 
-/// Delete stale screenshot temp files from previous sessions.
-/// Called explicitly at safe points (e.g. after successful save), not on every startup.
+/// How old a temp file must be before cleanup will delete it.
+///
+/// Guards against removing a capture the editor still has open: a capture from
+/// the current session is minutes old at most, and anything genuinely stale is
+/// left over from a previous run.
+const TEMP_FILE_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Delete stale FrameXShot temp captures from previous sessions.
+///
+/// Scoped to the app's own temp subdirectory, so it cannot touch files written
+/// by anything else. Called explicitly at safe points, not on every startup.
 #[tauri::command]
 pub async fn cleanup_old_screenshots() -> Result<usize, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        crate::utils::cleanup_temp_files().map_err(|e| e.to_string())
+        crate::utils::cleanup_temp_files(TEMP_FILE_MIN_AGE).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
 }
 
-/// Capture screenshot using Linux native tools with interactive region selection.
-/// Dispatches to the cross-desktop fallback chain in capture.rs:
-/// COSMIC → KDE spectacle → grim+slurp (wlroots) → GNOME Shell D-Bus → gnome-screenshot → maim/scrot
+/// Capture screenshot with interactive region selection.
+///
+/// Linux: dispatches to the cross-desktop fallback chain in capture.rs
+/// (COSMIC → KDE spectacle → grim+slurp (wlroots) → GNOME Shell D-Bus →
+/// gnome-screenshot → maim/scrot) and returns the captured file path.
+///
+/// Windows/macOS: the interactive flow lives in the frontend region-selector
+/// overlay. The backend captures the monitor under the cursor, stashes it as the
+/// pending screenshot, moves the overlay to cover that same monitor and shows it,
+/// then returns the literal `"ok"`.
 #[tauri::command]
-pub async fn native_capture_interactive(save_dir: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let _lock = SCREENCAPTURE_LOCK
-            .lock()
-            .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+pub async fn native_capture_interactive(
+    app_handle: AppHandle,
+    save_dir: String,
+) -> Result<String, String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = &save_dir;
 
-        let filename = generate_filename("screenshot", "png")?;
-        let screenshot_path = std::path::PathBuf::from(&save_dir).join(&filename);
+        // Read the cursor ONCE and use it for both halves: it picks the monitor
+        // to capture and the monitor to cover. Reading it twice could straddle a
+        // cursor move and put the overlay on a different display than the image.
+        let point = crate::overlay::cursor_position();
 
-        capture_region_tool(&screenshot_path)?;
-        Ok(screenshot_path.to_string_lossy().into_owned())
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
+        let screenshot_path = capture_monitor_at_point(point).await?;
+        let path_str = screenshot_path.to_string_lossy().into_owned();
+
+        let data_uri = tauri::async_runtime::spawn_blocking(move || {
+            let data_uri = file_to_data_uri(&path_str)?;
+            let _ = std::fs::remove_file(&path_str);
+            Ok::<String, String>(data_uri)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))??;
+
+        // Stash BEFORE showing: `RegionSelector` calls `capture_screen_for_selector`
+        // from its `onFocusChanged` / `visibilitychange` handlers, which fire as a
+        // result of the show below. The pending image must already be there.
+        {
+            let mut lock = PENDING_SCREENSHOT_B64
+                .lock()
+                .map_err(|e| format!("Mutex: {}", e))?;
+            *lock = Some(data_uri);
+        }
+
+        // The selector window is pre-created hidden (`visible(false)`) at startup,
+        // so it MUST be shown here. `set_focus()` alone cannot do it: tao bails out
+        // early on a window whose VISIBLE flag is unset, on both Windows
+        // (`platform_impl/windows/window.rs` — `if is_visible && !is_minimized`) and
+        // macOS (`platform_impl/macos/window.rs` — `if !is_minimized && is_visible`).
+        // Without this the overlay never appears and the region flow dead-ends.
+        crate::overlay::place_and_show_selector(&app_handle, point)?;
+
+        return Ok("ok".to_string());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = &app_handle;
+        tauri::async_runtime::spawn_blocking(move || {
+            let _lock = SCREENCAPTURE_LOCK
+                .lock()
+                .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+
+            let filename = generate_filename("screenshot", "png")?;
+            let screenshot_path = std::path::PathBuf::from(&save_dir).join(&filename);
+
+            capture_region_tool(&screenshot_path)?;
+            Ok(screenshot_path.to_string_lossy().into_owned())
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
+    }
 }
 
 /// Capture full screen
@@ -218,127 +287,238 @@ pub async fn native_capture_window(save_dir: String) -> Result<String, String> {
         let filename = generate_filename("screenshot", "png")?;
         let screenshot_path = std::path::PathBuf::from(&save_dir).join(&filename);
 
-        if capture_window(&screenshot_path).is_ok() {
+        #[cfg(not(target_os = "linux"))]
+        {
+            // `capture_window` and `capture_fullscreen` dispatch to the xcap
+            // implementations in `xcap_capture` on Windows and macOS.
+            if capture_window(&screenshot_path).is_ok() {
+                return Ok(screenshot_path.to_string_lossy().into_owned());
+            }
+
+            // There is no interactive region tool on Windows/macOS, so fall
+            // back to a stitched full-desktop capture rather than the region
+            // tool.
+            capture_fullscreen(&screenshot_path)?;
             return Ok(screenshot_path.to_string_lossy().into_owned());
         }
 
-        // Fall back to interactive region selection
-        capture_region_tool(&screenshot_path)?;
-        Ok(screenshot_path.to_string_lossy().into_owned())
+        #[cfg(target_os = "linux")]
+        {
+            if capture_window(&screenshot_path).is_ok() {
+                return Ok(screenshot_path.to_string_lossy().into_owned());
+            }
+
+            // Fall back to interactive region selection
+            capture_region_tool(&screenshot_path)?;
+            Ok(screenshot_path.to_string_lossy().into_owned())
+        }
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
 }
 
-/// Play screenshot sound using paplay / aplay
+/// Play the platform screenshot sound.
+/// Windows: `MessageBeep` (system sound).
+/// macOS: `afplay` on a system sound.
+/// Linux: paplay / aplay.
 #[tauri::command]
 pub async fn play_screenshot_sound() -> Result<(), String> {
     std::thread::spawn(|| {
-        // Try common Linux screenshot sounds
-        let sound_paths = [
-            "/usr/share/sounds/freedesktop/stereo/screen-capture.oga",
-            "/usr/share/sounds/gnome/default/alerts/glass.ogg",
-            "/usr/share/sounds/ubuntu/stereo/screen-capture.ogg",
-        ];
+        #[cfg(target_os = "windows")]
+        {
+            use winapi::um::winuser::{MessageBeep, MB_ICONASTERISK};
+            // Fire-and-forget: MessageBeep returns as soon as the sound is
+            // queued, and we don't care whether the user has sound muted.
+            unsafe {
+                MessageBeep(MB_ICONASTERISK);
+            }
+        }
 
-        for sound_path in &sound_paths {
-            if std::path::Path::new(sound_path).exists() {
-                if Command::new("paplay")
-                    .arg(sound_path)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-                {
+        #[cfg(target_os = "macos")]
+        {
+            // Fire-and-forget: ignore all errors. Both sounds ship with macOS;
+            // Glass is preferred, Ping is the fallback if it is missing.
+            let sound_path = if std::path::Path::new("/System/Library/Sounds/Glass.aiff").exists() {
+                "/System/Library/Sounds/Glass.aiff"
+            } else {
+                "/System/Library/Sounds/Ping.aiff"
+            };
+            let _ = Command::new("afplay")
+                .arg(sound_path)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let sound_paths = [
+                "/usr/share/sounds/freedesktop/stereo/screen-capture.oga",
+                "/usr/share/sounds/gnome/default/alerts/glass.ogg",
+                "/usr/share/sounds/ubuntu/stereo/screen-capture.ogg",
+            ];
+
+            for sound_path in &sound_paths {
+                if std::path::Path::new(sound_path).exists() {
+                    if Command::new("paplay")
+                        .arg(sound_path)
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false)
+                    {
+                        return;
+                    }
+                    let _ = Command::new("aplay")
+                        .arg(sound_path)
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn();
                     return;
                 }
-                // fallback: aplay
-                let _ = Command::new("aplay")
-                    .arg(sound_path)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn();
-                return;
             }
         }
     });
     Ok(())
 }
 
-/// Get the current mouse cursor position
+/// Get the current mouse cursor position.
+/// Windows: `GetCursorPos` (physical virtual-desktop coordinates).
+/// macOS: `CGEventGetLocation` (Quartz global points).
+/// Linux: xdotool on X11, (0,0) on Wayland.
 #[tauri::command]
 pub async fn get_mouse_position() -> Result<(f64, f64), String> {
-    // Use xdotool on X11
-    if !is_wayland() && has_binary("xdotool") {
-        let output = Command::new("xdotool")
-            .arg("getmouselocation")
-            .arg("--shell")
-            .output()
-            .map_err(|e| format!("Failed to get mouse position: {}", e))?;
-
-        if output.status.success() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            let mut x = 0.0f64;
-            let mut y = 0.0f64;
-            for line in text.lines() {
-                if let Some(val) = line.strip_prefix("X=") {
-                    x = val.trim().parse().unwrap_or(0.0);
-                }
-                if let Some(val) = line.strip_prefix("Y=") {
-                    y = val.trim().parse().unwrap_or(0.0);
-                }
-            }
-            return Ok((x, y));
-        }
+    // Both non-Linux arms return coordinates in the same space
+    // `show_quick_overlay` compares against the physical positions from
+    // `app.available_monitors()`.
+    //
+    // macOS used to hardcode (0,0) here, which silently pinned the quick overlay
+    // to the first monitor. It now reads the real cursor via CoreGraphics — see
+    // `overlay::cursor_position`.
+    #[cfg(not(target_os = "linux"))]
+    {
+        crate::overlay::cursor_position()
+            .ok_or_else(|| "Failed to read cursor position".to_string())
     }
 
-    // Wayland: no reliable cross-compositor way; return (0,0) — window will center
-    Ok((0.0, 0.0))
+    #[cfg(target_os = "linux")]
+    {
+        if !is_wayland() && has_binary("xdotool") {
+            let output = Command::new("xdotool")
+                .arg("getmouselocation")
+                .arg("--shell")
+                .output()
+                .map_err(|e| format!("Failed to get mouse position: {}", e))?;
+
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let mut x = 0.0f64;
+                let mut y = 0.0f64;
+                for line in text.lines() {
+                    if let Some(val) = line.strip_prefix("X=") {
+                        x = val.trim().parse().unwrap_or(0.0);
+                    }
+                    if let Some(val) = line.strip_prefix("Y=") {
+                        y = val.trim().parse().unwrap_or(0.0);
+                    }
+                }
+                return Ok((x, y));
+            }
+        }
+
+        // Wayland: no reliable cross-compositor way; return (0,0) — window will center
+        Ok((0.0, 0.0))
+    }
 }
 
-/// Capture region and perform OCR, copying text to clipboard
+/// Capture region and perform OCR, copying text to clipboard.
+///
+/// Windows/macOS: there is no shell region tool, so the backend captures the
+/// primary monitor, stashes it as the pending screenshot, shows and focuses the
+/// `region-selector` window and returns `"REGION_SELECTOR_OPENED"`. The frontend
+/// treats that as "the selector is already open — just return" and the OCR then
+/// runs on the cropped file via `perform_ocr_on_file`.
 #[tauri::command]
-pub async fn native_capture_ocr_region(save_dir: String) -> Result<String, String> {
-    let screenshot_path = tauri::async_runtime::spawn_blocking(move || {
-        let _lock = SCREENCAPTURE_LOCK
-            .lock()
-            .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+pub async fn native_capture_ocr_region(
+    app_handle: AppHandle,
+    save_dir: String,
+) -> Result<String, String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = &save_dir;
 
-        let filename = generate_filename("ocr_temp", "png")?;
-        let save_path = PathBuf::from(&save_dir);
-        let path = save_path.join(&filename);
-        let path_str = path.to_string_lossy().to_string();
+        // Same single cursor read as `native_capture_interactive` — capture and
+        // cover the one monitor the user is pointing at.
+        let point = crate::overlay::cursor_position();
 
-        let captured = capture_interactive_inner(&path_str)?;
-        if !std::path::Path::new(&captured).exists() {
-            return Err("Screenshot was cancelled or failed".to_string());
+        let screenshot_path = capture_monitor_at_point(point).await?;
+        let path_str = screenshot_path.to_string_lossy().into_owned();
+
+        let data_uri = tauri::async_runtime::spawn_blocking(move || {
+            let data_uri = file_to_data_uri(&path_str)?;
+            let _ = std::fs::remove_file(&path_str);
+            Ok::<String, String>(data_uri)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))??;
+
+        {
+            let mut lock = PENDING_SCREENSHOT_B64
+                .lock()
+                .map_err(|e| format!("Mutex: {}", e))?;
+            *lock = Some(data_uri);
         }
-        Ok::<String, String>(captured)
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))??;
 
-    play_screenshot_sound().await.ok();
+        crate::overlay::place_and_show_selector(&app_handle, point)?;
 
-    let path_clone = screenshot_path.clone();
-    let recognized_text = tauri::async_runtime::spawn_blocking(move || {
-        let recognized_text =
-            recognize_text_from_image(&path_clone).map_err(|e| format!("OCR failed: {}", e))?;
+        return Ok("REGION_SELECTOR_OPENED".to_string());
+    }
 
-        copy_text_to_clipboard(&recognized_text)
-            .map_err(|e| format!("Failed to copy text to clipboard: {}", e))?;
+    #[cfg(target_os = "linux")]
+    {
+        let _ = &app_handle;
+        let screenshot_path = tauri::async_runtime::spawn_blocking(move || {
+            let _lock = SCREENCAPTURE_LOCK
+                .lock()
+                .map_err(|e| format!("Failed to acquire lock: {}", e))?;
 
-        let _ = std::fs::remove_file(&path_clone);
-        Ok::<String, String>(recognized_text)
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))??;
+            let filename = generate_filename("ocr_temp", "png")?;
+            let save_path = PathBuf::from(&save_dir);
+            let path = save_path.join(&filename);
+            let path_str = path.to_string_lossy().to_string();
 
-    Ok(recognized_text)
+            let captured = capture_interactive_inner(&path_str)?;
+            if !std::path::Path::new(&captured).exists() {
+                return Err("Screenshot was cancelled or failed".to_string());
+            }
+            Ok::<String, String>(captured)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))??;
+
+        play_screenshot_sound().await.ok();
+
+        let path_clone = screenshot_path.clone();
+        let recognized_text = tauri::async_runtime::spawn_blocking(move || {
+            let recognized_text =
+                recognize_text_from_image(&path_clone).map_err(|e| format!("OCR failed: {}", e))?;
+
+            copy_text_to_clipboard(&recognized_text)
+                .map_err(|e| format!("Failed to copy text to clipboard: {}", e))?;
+
+            let _ = std::fs::remove_file(&path_clone);
+            Ok::<String, String>(recognized_text)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))??;
+
+        Ok(recognized_text)
+    }
 }
 
 /// Inner capture logic (no mutex, called when lock is already held)
+#[cfg(target_os = "linux")]
 fn capture_interactive_inner(path_str: &str) -> Result<String, String> {
     let path = std::path::Path::new(path_str);
 
@@ -446,10 +626,19 @@ pub async fn show_quick_overlay(
     Ok(())
 }
 
-/// Native folder selection dialog command for Linux / macOS / Windows
+/// Native folder selection dialog command.
+///
+/// Windows/macOS: uses `tauri-plugin-dialog`'s native picker.
+/// Linux: keeps the zenity → kdialog → python3/tkinter chain.
 #[tauri::command]
-pub async fn select_folder_dialog(default_path: Option<String>) -> Result<Option<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+pub async fn select_folder_dialog(
+    app: AppHandle,
+    default_path: Option<String>,
+) -> Result<Option<String>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = &app;
+        tauri::async_runtime::spawn_blocking(move || {
         // 1. Try zenity --file-selection --directory if available on Linux GTK/GNOME/Hyprland
         if has_binary("zenity") {
             let mut cmd = Command::new("zenity");
@@ -498,17 +687,43 @@ pub async fn select_folder_dialog(default_path: Option<String>) -> Result<Option
 
         // 3. Try python3 / tkinter dialog fallback
         if has_binary("python3") {
-            let initial_dir_py = default_path
+            // The script is a FIXED string and the directory is passed as argv[1].
+            //
+            // It previously interpolated the path into the source with
+            // `format!("initialdir='{}'", p.replace('\'', "\\'"))`. That escaping
+            // is wrong for Python — it handles `'` but not `\`, so a trailing
+            // backslash escaped the closing quote and broke the script. The save
+            // directory is free text the user types in Preferences, so this was
+            // user input compiled as code. Passing it as an argument means there
+            // is no quoting to get wrong.
+            const PICKER_SCRIPT: &str = "\
+import sys
+import tkinter as tk
+from tkinter import filedialog
+
+root = tk.Tk()
+root.withdraw()
+root.attributes('-topmost', True)
+kwargs = {}
+if len(sys.argv) > 1 and sys.argv[1]:
+    kwargs['initialdir'] = sys.argv[1]
+path = filedialog.askdirectory(**kwargs)
+print(path if path else '')
+";
+
+            let initial_dir = default_path
                 .as_ref()
-                .map(|p| format!("initialdir='{}'", p.replace('\'', "\\'")))
+                .map(|p| p.trim().to_string())
                 .unwrap_or_default();
 
-            let script = format!(
-                "import tkinter as tk, sys, os; from tkinter import filedialog; root = tk.Tk(); root.withdraw(); root.attributes('-topmost', True); path = filedialog.askdirectory({}); print(path if path else '')",
-                initial_dir_py
-            );
-
-            if let Ok(output) = Command::new("python3").arg("-c").arg(script).output() {
+            if let Ok(output) = Command::new("python3")
+                .arg("-c")
+                .arg(PICKER_SCRIPT)
+                // Always passed, even when empty: the script checks for an empty
+                // argv[1], and a fixed argument count keeps the two cases identical.
+                .arg(&initial_dir)
+                .output()
+            {
                 if output.status.success() {
                     let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     if !selected.is_empty() {
@@ -522,16 +737,185 @@ pub async fn select_folder_dialog(default_path: Option<String>) -> Result<Option
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
-}
+    }
 
-/// Read a file and return it as a base64 data URI.
-/// Exposed as a command so the frontend can load arbitrary image files
-/// without going through Tauri's asset protocol on Windows and Linux.
-#[tauri::command]
-pub async fn read_file_as_base64(path: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || file_to_data_uri(&path))
+    #[cfg(not(target_os = "linux"))]
+    {
+        use tauri_plugin_dialog::DialogExt;
+
+        // `blocking_pick_folder` must not run on the main thread — the crate
+        // docs are explicit about that — hence `spawn_blocking`.
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut builder = app.dialog().file().set_title("Select Save Directory");
+
+            if let Some(ref path) = default_path {
+                let trimmed = path.trim();
+                if !trimmed.is_empty() {
+                    builder = builder.set_directory(trimmed);
+                }
+            }
+
+            match builder.blocking_pick_folder() {
+                Some(folder) => {
+                    let folder_path = folder
+                        .into_path()
+                        .map_err(|e| format!("Invalid folder path: {}", e))?;
+                    Ok(Some(folder_path.to_string_lossy().into_owned()))
+                }
+                None => Ok(None),
+            }
+        })
         .await
         .map_err(|e| format!("Task join error: {}", e))?
+    }
+}
+
+/// Reported state of an optional external dependency, so the UI can show a
+/// specific "install X, here is how" message instead of a generic failure.
+#[derive(serde::Serialize)]
+pub struct DependencyStatus {
+    /// Whether the feature can be used right now.
+    pub available: bool,
+    /// Empty when `available`; otherwise a user-facing explanation of what to do.
+    pub hint: String,
+}
+
+/// Whether OCR can run (i.e. whether `tesseract` is installed and executable).
+///
+/// Tesseract is a hard package dependency on Linux, but nothing installs it
+/// alongside the NSIS or DMG bundles, so on Windows and macOS this can legitimately
+/// be `false`. See the `ocr` module docs for why it is not vendored.
+#[tauri::command]
+pub async fn check_ocr_available() -> Result<DependencyStatus, String> {
+    let available = tauri::async_runtime::spawn_blocking(crate::ocr::is_available)
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?;
+
+    Ok(DependencyStatus {
+        available,
+        hint: if available {
+            String::new()
+        } else {
+            format!(
+                "OCR needs the Tesseract engine, which is not installed. {}",
+                crate::ocr::INSTALL_HINT
+            )
+        },
+    })
+}
+
+/// Whether screen capture is permitted by the OS.
+///
+/// Only macOS gates this (TCC "Screen Recording"). Windows and Linux always
+/// report available, so the frontend can call this unconditionally.
+#[tauri::command]
+pub async fn check_screen_capture_permission() -> Result<DependencyStatus, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let available = crate::mac_api::has_screen_recording_permission();
+        return Ok(DependencyStatus {
+            available,
+            hint: if available {
+                String::new()
+            } else {
+                crate::mac_api::SCREEN_RECORDING_DENIED_MESSAGE.to_string()
+            },
+        });
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(DependencyStatus {
+            available: true,
+            hint: String::new(),
+        })
+    }
+}
+
+/// Open the OS screen-recording privacy settings, prompting first if macOS has
+/// never asked.
+///
+/// No-op off macOS. Deliberately fire-and-forget: if System Settings cannot be
+/// opened, the message from `check_screen_capture_permission` already tells the
+/// user where to go by hand.
+#[tauri::command]
+pub async fn open_screen_capture_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        // Shows the system prompt if and only if this bundle has never asked.
+        crate::mac_api::request_screen_recording_permission();
+
+        Command::new("open")
+            .arg(crate::mac_api::SCREEN_RECORDING_SETTINGS_URL)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| format!("Failed to open System Settings: {}", e))?;
+    }
+
+    Ok(())
+}
+
+/// Largest file this command will inline as base64.
+///
+/// A data URI costs ~4/3 the file size as a UTF-8 string in the Rust process,
+/// then again as a JS string in the webview, then again as decoded pixels. An
+/// unbounded read of a multi-gigabyte file would take the app down; capture PNGs
+/// at 8K are comfortably inside this.
+const MAX_INLINE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Read an **image** file and return it as a base64 data URI.
+///
+/// Exposed as a command so the frontend can load image files without going
+/// through Tauri's asset protocol, whose scope cannot cover user-chosen save
+/// directories on arbitrary drives.
+///
+/// Restricted to image extensions on purpose. The webview can pass any path it
+/// likes here, so without the check this is "read any file on disk and hand it
+/// to the frontend" — a much larger primitive than the feature needs. Every
+/// caller (`ImageEditor`, `QuickOverlay`, `auto-process`) loads images, so the
+/// restriction costs nothing. It is defence in depth, not the primary control:
+/// the primary control is the CSP, which admits no remote content.
+#[tauri::command]
+pub async fn read_file_as_base64(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let extension = std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .unwrap_or_default();
+
+        // Must cover every format the app can actually hand to this command.
+        // `avif` in particular is not optional: `src/assets/bg-images` ships two
+        // .avif backgrounds, and omitting it would reject them — a regression on
+        // all three platforms, not just the two this branch is about.
+        // Deliberately excludes `svg`, which is script-capable and which nothing
+        // loads through here.
+        if !matches!(
+            extension.as_str(),
+            "png" | "jpg" | "jpeg" | "webp" | "avif" | "gif" | "bmp"
+        ) {
+            return Err(format!(
+                "Refusing to read '{}': only image files can be loaded this way",
+                extension
+            ));
+        }
+
+        let size = std::fs::metadata(&path)
+            .map_err(|e| format!("Failed to read image file: {}", e))?
+            .len();
+        if size > MAX_INLINE_FILE_BYTES {
+            return Err(format!(
+                "Image is too large to load ({} MB, limit {} MB)",
+                size / (1024 * 1024),
+                MAX_INLINE_FILE_BYTES / (1024 * 1024)
+            ));
+        }
+
+        file_to_data_uri(&path)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }
 
 /// Returns a CLONE of the stored screenshot for the selector overlay to display.
@@ -553,9 +937,7 @@ pub async fn capture_screen_for_selector(_app_handle: AppHandle) -> Result<Strin
     // a portal/grim call on every app launch.
     #[cfg(target_os = "linux")]
     {
-        return Err(
-            "No pending screenshot — region selector is not used on Linux".to_string(),
-        );
+        return Err("No pending screenshot — region selector is not used on Linux".to_string());
     }
 
     // Fallback if no stored screenshot (Windows/macOS only — see above).
@@ -608,8 +990,8 @@ pub async fn crop_and_save_region(
         use std::io::Cursor;
 
         let raw = data_uri
-            .splitn(2, ',')
-            .nth(1)
+            .split_once(',')
+            .map(|(_header, payload)| payload)
             .ok_or("Malformed base64 data URI")?;
         let bytes = general_purpose::STANDARD
             .decode(raw)
