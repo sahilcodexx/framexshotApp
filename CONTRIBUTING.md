@@ -127,8 +127,8 @@ If you're considering a non-trivial change — especially anything in the paths 
 1. **Fork the repository** and clone your fork:
 
    ```bash
-   git clone https://github.com/sahilcodexx/framexshot.git
-   cd framexshot
+   git clone https://github.com/sahilcodexx/framexshotApp.git
+   cd framexshotApp
    ```
 
 2. **Install dependencies:**
@@ -144,16 +144,15 @@ If you're considering a non-trivial change — especially anything in the paths 
 
 ### Installing FrameXShot for Testing
 
-On Linux, install with the universal CLI installer (builds from source) or the AUR package:
+On Linux, use the universal CLI installer to build from source:
 
 ```bash
-# CLI installer (all distros)
-curl -fsSL https://raw.githubusercontent.com/sahilcodexx/framexshot/main/packaging/install.sh | sh
-
-# or on Arch: yay -S framexshot
+curl -fsSL https://raw.githubusercontent.com/sahilcodexx/framexshotApp/main/packaging/install.sh | sh
 ```
 
-On Windows/macOS, download the native installer from [GitHub Releases](https://github.com/sahilcodexx/framexshot/releases).
+Or download a prebuilt package for your distro from [GitHub Releases](https://github.com/sahilcodexx/framexshotApp/releases) — see the [Install](../../releases) section in the README for the right file per distro.
+
+On Windows/macOS, download the native installer from the same Releases page.
 
 ## Development Setup
 
