@@ -1,0 +1,113 @@
+app-id: com.framexshot.app
+runtime: org.gnome.Platform
+runtime-version: '49'
+sdk: org.gnome.Sdk
+command: framexshot
+
+# GNOME 49 runtime ships libwebkit2gtk-4.1, GTK 3, GLib, etc.
+# (GNOME 48 runtime is EOL since 2026-04-11 — do not downgrade.)
+# Users need zero system libraries — works on every distro with Flatpak.
+
+finish-args:
+  # ── Display ─────────────────────────────────────────────────────────────
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+
+  # ── Filesystem ──────────────────────────────────────────────────────────
+  - --filesystem=home
+  - --filesystem=xdg-pictures
+  - --filesystem=xdg-desktop
+  - --filesystem=/tmp
+
+  # ── D-Bus / portals ─────────────────────────────────────────────────────
+  - --socket=session-bus
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --talk-name=org.freedesktop.portal.Desktop
+  - --talk-name=org.freedesktop.portal.FileChooser
+  - --talk-name=org.freedesktop.portal.Screenshot
+  - --talk-name=org.freedesktop.portal.OpenURI
+  # GNOME Shell screenshot D-Bus service (SelectArea/ScreenshotArea) —
+  # the only interactive capture that works inside the sandbox on GNOME.
+  - --talk-name=org.gnome.Shell
+  - --system-talk-name=org.freedesktop.login1
+
+  # ── Runtime env ─────────────────────────────────────────────────────────
+  # DMABuf can blank the WebView on some GPUs inside the sandbox.
+  - --env=WEBKIT_DISABLE_DMABUF_RENDERER=1
+
+  # ── Host tool access (for screen-capture fallbacks) ─────────────────────
+  # The capture chain tries grim/slurp/spectacle/cosmic-screenshot/etc.
+  # before the portal. Those binaries live on the host, NOT inside this
+  # Flatpak (which only has /app/bin). flatpak-spawn --host is the
+  # supported, narrowly-scoped way to invoke a single host binary
+  # without giving up the rest of the sandbox. flatpak-spawn is part
+  # of the Flatpak runtime and is always available — no permission
+  # flag needed to use it.
+  #
+  # Persist the screenshot portal grant so the user doesn't see a
+  # permission dialog on the first capture. They can revoke via
+  # `flatpak permission-reset screenshot com.framexshot.app`.
+  - --persist=screenshot
+
+modules:
+  # Official Flathub shared-modules recipe (correct commits + patches).
+  - shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json
+
+  # Optional OCR binary for the OCR capture mode.
+  - name: tesseract
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DBUILD_TRAINING_TOOLS=OFF
+      - -DGRAPHICS_DISABLED=ON
+    sources:
+      - type: archive
+        url: https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.5.0.tar.gz
+        sha256: f2fb34ca035b6d087a42875a35a7a5c4155fa9979c6132365b1e5a28ebc3fc11
+    modules:
+      - name: leptonica
+        buildsystem: cmake-ninja
+        builddir: true
+        config-opts:
+          - -DBUILD_PROG=OFF
+          - -DBUILD_SHARED_LIBS=ON
+        sources:
+          - type: archive
+            url: https://github.com/DanBloomberg/leptonica/releases/download/1.85.0/leptonica-1.85.0.tar.gz
+            sha256: 3745ae3bf271a6801a2292eead83ac926e3a9bc1bf622e9cd4dd0f3786e17205
+      - name: tessdata-fast-eng
+        buildsystem: simple
+        build-commands:
+          - install -Dm644 eng.traineddata /app/share/tessdata/eng.traineddata
+        sources:
+          - type: file
+            url: https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/eng.traineddata
+            sha256: 7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2
+            dest-filename: eng.traineddata
+
+  - name: framexshot
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 framexshot /app/bin/framexshot
+      - install -Dm644 icon-128.png /app/share/icons/hicolor/128x128/apps/com.framexshot.app.png
+      - install -Dm644 icon-32.png /app/share/icons/hicolor/32x32/apps/com.framexshot.app.png
+      - install -Dm644 com.framexshot.app.desktop /app/share/applications/com.framexshot.app.desktop
+      - install -Dm644 com.framexshot.app.metainfo.xml /app/share/metainfo/com.framexshot.app.metainfo.xml
+    sources:
+      # Pre-built binary from CI (or local `cargo build --release`).
+      - type: file
+        path: ../src-tauri/target/release/framexshot
+        dest-filename: framexshot
+      - type: file
+        path: ../src-tauri/icons/128x128.png
+        dest-filename: icon-128.png
+      - type: file
+        path: ../src-tauri/icons/32x32.png
+        dest-filename: icon-32.png
+      - type: file
+        path: com.framexshot.app.desktop
+      - type: file
+        path: com.framexshot.app.metainfo.xml

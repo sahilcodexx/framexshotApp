@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+package-lock.json
+
+# Build outputs
+dist/
+src-tauri/target/
+AppDir/
+
+# Tauri
+*.AppImage
+*.deb
+*.rpm
+*.dmg
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Editor
+.vscode/settings.json
+.vscode/*.code-workspace
+*.swp
+*.swo
+.DS_Store
+
+# Agent / assistant tooling (local-only — not part of the project)
+.agents/
+.claude/
+agent/
+skills-lock.json
+
+# Logs
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test coverage
+coverage/
+
+# Temp
+*.tmp
+*.temp
+config.bat
+squashfs-root/

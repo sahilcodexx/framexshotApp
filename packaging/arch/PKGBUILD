@@ -1,0 +1,105 @@
+# Maintainer: sahilcodex <sahil171759@gmail.com>
+#
+# Native Arch package — compiles against your system WebKit/GTK (no Flatpak
+# sandbox). On Hyprland, region/screen/window capture uses grim+slurp and
+# hyprctl directly (no xdg-desktop-portal required).
+#
+# CI / local build:
+#   ./packaging/arch/build-package.sh
+#
+# Install:
+#   sudo pacman -U framexshot_<version>_x86_64.pkg.tar.zst
+#
+# AUR (same recipe, tarball source):
+#   packaging/aur/PKGBUILD
+
+pkgname=framexshot
+pkgver=1.1.0
+pkgrel=1
+pkgdesc="Beautiful, effortless screenshot tool for Linux — capture regions, screens, windows or text (OCR), then edit with frames, backgrounds, effects and annotations."
+arch=('x86_64' 'aarch64')
+url="https://github.com/sahilcodexx/framexshot"
+license=('MIT')
+depends=(
+  'webkit2gtk-4.1'
+  'gtk3'
+  'libsoup3'
+  'libappindicator-gtk3'
+  'tesseract'
+  'grim'
+  'slurp'
+  'wl-clipboard'
+  'xclip'
+  'xsel'
+  'xdg-desktop-portal'
+  'zenity'
+  'kdialog'
+  'xdotool'
+)
+makedepends=(
+  'base-devel'
+  'nodejs'
+  'rust'
+  'cargo'
+  'pkgconf'
+  'glib2'
+  'librsvg'
+  'openssl'
+)
+# pnpm is NOT a makedep — makepkg would try `pacman -S pnpm` and fail if you
+# already installed pnpm via npm/corepack (file conflicts on /usr/bin/pn etc.).
+# Install pnpm yourself: `sudo pacman -S pnpm` OR `npm install -g pnpm`
+optdepends=(
+  'pnpm: frontend build tool (or use npm-installed pnpm / corepack)'
+  'appmenu-gtk-module: global menu integration in some desktop environments'
+  'hyprshot: Hyprland region/window capture helper'
+  'hyprland-contrib: grimblast wrapper for Hyprland capture'
+  'xdg-desktop-portal-hyprland: Hyprland portal backend (clipboard/dialog fallbacks)'
+  'spectacle: KDE Plasma capture support'
+  'scrot: X11 capture fallback'
+  'maim: X11 region capture fallback'
+  'cosmic-screenshot: COSMIC desktop capture support'
+)
+source=("framexshot-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/framexshot-$pkgver"
+
+  if ! command -v pnpm >/dev/null; then
+    echo "ERROR: pnpm not found on PATH."
+    echo "  sudo pacman -S pnpm          # if no npm pnpm installed"
+    echo "  npm install -g pnpm          # or via npm/corepack"
+    exit 1
+  fi
+
+  pnpm install --frozen-lockfile
+  # Must use `tauri build` — plain `cargo build` produces a ~15 MB binary
+  # WITHOUT embedded frontend assets → blank WebKit window ("Operation was cancelled").
+  pnpm tauri build --no-bundle
+
+  if ! strings "src-tauri/target/release/framexshot" | grep -q '/assets/index-'; then
+    echo "ERROR: Frontend assets were not embedded into the release binary."
+    echo "       Re-run: rm -rf src-tauri/target dist && pnpm tauri build --no-bundle"
+    exit 1
+  fi
+}
+
+package() {
+  cd "$srcdir/framexshot-$pkgver"
+
+  install -Dm755 "src-tauri/target/release/framexshot" \
+    "$pkgdir/usr/bin/framexshot"
+
+  install -Dm644 "src-tauri/icons/128x128.png" \
+    "$pkgdir/usr/share/icons/hicolor/128x128/apps/com.framexshot.app.png"
+  install -Dm644 "src-tauri/icons/32x32.png" \
+    "$pkgdir/usr/share/icons/hicolor/32x32/apps/com.framexshot.app.png"
+  install -Dm644 "src-tauri/icons/icon.png" \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/com.framexshot.app.png"
+
+  install -Dm644 "flatpak/com.framexshot.app.desktop" \
+    "$pkgdir/usr/share/applications/com.framexshot.app.desktop"
+  install -Dm644 "flatpak/com.framexshot.app.metainfo.xml" \
+    "$pkgdir/usr/share/metainfo/com.framexshot.app.metainfo.xml"
+}

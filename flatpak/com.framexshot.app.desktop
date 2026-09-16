@@ -1,0 +1,11 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Name=FrameXShot
+GenericName=Screenshot Tool
+Comment=Capture, annotate and share screenshots
+Exec=env WEBKIT_DISABLE_DMABUF_RENDERER=1 framexshot
+Icon=com.framexshot.app
+Type=Application
+Categories=Graphics;Photography;
+Keywords=screenshot;capture;screen;region;annotate;
+StartupNotify=true

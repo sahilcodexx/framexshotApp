@@ -1,0 +1,430 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Native packages: Linux (.deb + .rpm, x86_64 + arm64), Windows (NSIS), macOS (DMG) ──
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux: .deb / .rpm in the matrix job. Flatpak is built in a separate
+          # `flatpak` job (best-effort) and uploaded when ready. AppImage was
+          # dropped because the bundled linuxdeploy strip (binutils 2.35) cannot
+          # process CachyOS / Arch libraries that contain .relr.dyn sections.
+          - platform: ubuntu-24.04
+            args: --bundles deb,rpm
+            arch: linux-x86_64
+          - platform: ubuntu-24.04-arm
+            args: --bundles deb,rpm
+            arch: linux-arm64
+          - platform: windows-latest
+            args: ''
+            arch: windows
+          # macos-13 (Intel) runners are retired — build Intel via cross-target
+          # on an Apple Silicon runner instead.
+          - platform: macos-14
+            args: --target x86_64-apple-darwin
+            arch: macos-x86_64
+          - platform: macos-14
+            args: ''
+            arch: macos-aarch64
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Intel macOS cross-compile target
+        if: matrix.arch == 'macos-x86_64'
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux dependencies
+        if: contains(matrix.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libxdo-dev clang libclang-dev \
+            file squashfs-tools libpipewire-0.3-dev libgbm-dev libdrm-dev \
+            rpm xz-utils zstd xdg-utils
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve app version (asset names use the bare version, no "v")
+        run: echo "APP_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Generate release notes
+        id: release_notes
+        shell: bash
+        run: |
+          TAG_NAME="${{ github.ref_name }}"
+          PREV_TAG=$(git tag --sort=-v:refname | sed -n '2p')
+          if [ -z "$PREV_TAG" ]; then
+            COMMITS=$(git log --oneline --pretty=format:"- %s" --reverse)
+          else
+            COMMITS=$(git log "$PREV_TAG".."$TAG_NAME" --oneline --pretty=format:"- %s" --reverse)
+          fi
+          if [ -z "$COMMITS" ]; then
+            COMMITS="- FrameXShot initial release"
+          fi
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMITS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Disable binary stripping in linuxdeploy's bundled GNU strip 2.35.
+          # Arch / CachyOS libraries contain .relr.dyn RELR relocations that
+          # strip 2.35 (2021) does not understand and corrupts. NO_STRIP=1 is
+          # the official linuxdeploy env var that skips the strip pass entirely.
+          # The strip in Cargo.toml [profile.release] still runs (that uses the
+          # host's strip, which is new enough on the Ubuntu 24.04 runner).
+          NO_STRIP: "1"
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'FrameXShot ${{ github.ref_name }}'
+          releaseBody: |
+            ## Downloads & Installation
+
+            | Platform | Package | Notes |
+            |----------|---------|-------|
+            | **Linux (x86_64)** | `.deb`, `.rpm`, `.pkg.tar.zst`, `.flatpak` | Native Arch package recommended on CachyOS/Arch/Hyprland (grim+slurp, no portal sandbox) |
+            | **Linux (arm64)** | `.deb`, `.rpm` | Raspberry Pi / Asahi / etc. |
+            | **Windows** | `*_x64-setup.exe` | standard installer |
+            | **macOS (Intel)** | `*_x64.dmg` | macOS 10.15+ |
+            | **macOS (Apple Silicon)** | `*_aarch64.dmg` | macOS 10.15+ |
+
+            ### Linux — pick what fits your distro
+
+            **Arch / CachyOS / Manjaro / EndeavourOS (native package — best on Hyprland):**
+            ```sh
+            sudo pacman -U ./framexshot_${{ env.APP_VERSION }}_x86_64.pkg.tar.zst
+            ```
+            Compiles against your system WebKit/GTK; capture uses `grim`+`slurp` directly (no Flatpak portal sandbox). Install optional Hyprland helpers: `sudo pacman -S hyprshot hyprland-contrib xdg-desktop-portal-hyprland`.
+
+            **Arch (AUR):**
+            ```sh
+            yay -S framexshot
+            ```
+
+            **Flatpak (every distro, self-contained runtime):**
+            ```sh
+            flatpak install --user ./framexshot_${{ env.APP_VERSION }}_amd64.flatpak
+            ```
+            Self-contained sandbox; ships its own libwayland, Mesa, and WebKit2GTK so it works identically on rolling distros where native packages lag.
+
+            **Debian / Ubuntu / Pop!_OS / Mint / Elementary:**
+            ```sh
+            sudo apt install ./framexshot_${{ env.APP_VERSION }}_amd64.deb
+            ```
+
+            **Fedora / RHEL / Nobara / openSUSE:**
+            ```sh
+            sudo dnf install ./framexshot_${{ env.APP_VERSION }}_x86_64.rpm
+            ```
+
+            **Build from source (against your system libs):**
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/sahilcodexx/framexshot/main/packaging/install.sh | sh
+            ```
+
+            ### Windows
+            ```sh
+            framexshot_${{ env.APP_VERSION }}_x64-setup.exe
+            ```
+
+            ### macOS (Apple Silicon)
+            ```sh
+            open framexshot_${{ env.APP_VERSION }}_aarch64.dmg
+            ```
+
+            ### macOS (Intel)
+            ```sh
+            open framexshot_${{ env.APP_VERSION }}_x64.dmg
+            ```
+
+            > **Note:** AppImage builds were dropped starting v1.0.0. The Tauri-bundled `linuxdeploy` ships `strip` (binutils 2.35) which cannot process CachyOS / Arch libraries containing `.relr.dyn` RELR relocations, and rolling distros ship a different libwayland/libgbm than the AppImage bundles. Flatpak sidesteps both problems by pinning a stable runtime.
+
+            ## What's New
+            ${{ steps.release_notes.outputs.notes }}
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+  # ── Build Flatpak bundle (the universal Linux format) ──
+  # Decoupled from publish: failure here will not block the deb/rpm/dmg
+  # release. Flatpak is now the canonical install path for Linux because
+  # it ships its own libwayland/Mesa/WebKit2GTK runtime and works on every
+  # distro (CachyOS, Arch, Fedora, Ubuntu, openSUSE, Mint, Pop, …) without
+  # the version-skew issues that broke the AppImage on rolling distros.
+  # End users install with: flatpak install --user --from file.flatpak
+
+  flatpak:
+    needs: build
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libxdo-dev clang libclang-dev \
+            libpipewire-0.3-dev libgbm-dev libdrm-dev \
+            ccache flatpak flatpak-builder
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve app version (asset names use the bare version, no "v")
+        run: echo "APP_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Build frontend
+        run: pnpm run build
+
+      - name: Build Rust binary
+        # cargo build embeds dist/ via generate_context!() at compile time.
+        # The resulting binary is self-contained (frontend assets baked in).
+        # --locked protects the committed Cargo.lock; --frozen (offline) is
+        # avoided because fresh runners lack a cached crates.io index.
+        run: cargo build --release --locked --manifest-path src-tauri/Cargo.toml
+
+      # Cache the GNOME SDK/Platform runtimes — first run ~2 GB download, then instant.
+      # GNOME 49 platform: 48 is EOL (2026-04-11) — bump both the version AND
+      # the cache key together or the stale cache will be reused.
+      - name: Cache Flatpak runtimes
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/flatpak
+          key: flatpak-gnome-platform-49-v1
+
+      # Cache Flatpak sources + ccache between runs.
+      - name: Cache Flatpak build state
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/flatpak-builder
+          key: flatpak-builder-cache-49-${{ hashFiles('flatpak/**', 'src-tauri/Cargo.lock') }}
+
+      - name: Install GNOME Flatpak runtime
+        run: |
+          flatpak remote-add --user --if-not-exists flathub \
+            https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user --noninteractive -y flathub \
+            org.gnome.Platform//49 \
+            org.gnome.Sdk//49
+
+      - name: Verify shared-modules recipe is vendored
+        run: |
+          test -f flatpak/shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json \
+            || { echo "flatpak/shared-modules/ must be committed (see AGENTS.md Change 21)"; exit 1; }
+
+      - name: Build Flatpak bundle
+        run: |
+          flatpak-builder \
+            --user \
+            --force-clean \
+            --ccache \
+            --repo=flatpak-repo \
+            flatpak-build-dir \
+            flatpak/com.framexshot.app.yml
+
+          flatpak build-bundle \
+            --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo \
+            flatpak-repo \
+            framexshot_${{ env.APP_VERSION }}_amd64.flatpak \
+            com.framexshot.app
+
+      - name: Validate Flatpak bundle
+        run: |
+          test -f framexshot_${{ env.APP_VERSION }}_amd64.flatpak
+          flatpak install --user --noninteractive -y \
+            framexshot_${{ env.APP_VERSION }}_amd64.flatpak
+          flatpak info --show-ref com.framexshot.app
+
+      - name: Upload Flatpak to release (best-effort)
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            framexshot_${{ env.APP_VERSION }}_amd64.flatpak \
+            --clobber || echo "Flatpak upload failed; release was still published."
+
+  # ── Build native Arch .pkg.tar.zst (best for CachyOS / Arch / Hyprland) ──
+  arch:
+    needs: build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    if: startsWith(github.ref, 'refs/tags/')
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm \
+            base-devel git rsync \
+            pnpm nodejs rust cargo \
+            webkit2gtk-4.1 gtk3 libsoup3 libappindicator-gtk3 tesseract \
+            grim slurp wl-clipboard xclip xsel xdg-desktop-portal \
+            zenity kdialog xdotool openssl librsvg appmenu-gtk-module \
+            hyprshot xdg-desktop-portal-hyprland github-cli \
+            clang pkgconf
+
+      - name: Resolve app version
+        run: echo "APP_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Build Arch package
+        run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder -c "$GITHUB_WORKSPACE/packaging/arch/build-package.sh ${APP_VERSION}"
+
+      - name: Validate Arch package
+        run: test -f "framexshot_${{ env.APP_VERSION }}_x86_64.pkg.tar.zst"
+
+      - name: Sign Arch package with maintainer GPG key
+        if: ${{ env.GPG_PRIVATE_KEY }}
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          # Write env var to a file (it MUST match /tmp/gpg-private.key from
+          # the maintainer's local machine, SHA256 10ccd4a81a83d73390c6960f854347bc2b427b089c8acebdf6004d606e44f1b6)
+          printf '%s\n' "$GPG_PRIVATE_KEY" > /tmp/gpg-private.key
+          EXPECTED_SHA256="10ccd4a81a83d73390c6960f854347bc2b427b089c8acebdf6004d606e44f1b6"
+          ACTUAL_SHA256=$(sha256sum /tmp/gpg-private.key | awk '{print $1}')
+          echo "Expected SHA256: $EXPECTED_SHA256"
+          echo "Actual   SHA256: $ACTUAL_SHA256"
+          if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+            echo "ERROR: GPG_PRIVATE_KEY secret is corrupt (hash mismatch)." >&2
+            echo "       Re-run: gh secret set GPG_PRIVATE_KEY < /tmp/gpg-private.key" >&2
+            echo "       File size: $(stat -c '%s' /tmp/gpg-private.key) bytes (expected 6772)" >&2
+            exit 1
+          fi
+          gpg --batch --import /tmp/gpg-private.key
+          rm -f /tmp/gpg-private.key
+          KEY_ID=$(gpg --list-secret-keys --keyid-format=long | \
+            grep -E '^sec' | head -1 | awk '{print $2}' | cut -d/ -f2)
+          if [ -z "$KEY_ID" ]; then
+            echo "ERROR: failed to extract key ID after import" >&2
+            gpg --list-secret-keys >&2
+            exit 1
+          fi
+          echo "Signing with key ID: $KEY_ID"
+          echo "$GPG_PASSPHRASE" | gpg --batch --pinentry-mode loopback \
+            --passphrase-fd 0 --yes --detach-sign \
+            --output "framexshot_${{ env.APP_VERSION }}_x86_64.pkg.tar.zst.sig" \
+            "framexshot_${{ env.APP_VERSION }}_x86_64.pkg.tar.zst"
+          test -f "framexshot_${{ env.APP_VERSION }}_x86_64.pkg.tar.zst.sig" \
+            || { echo "ERROR: .sig file was not created" >&2; exit 1; }
+
+      - name: Upload Arch package to release (best-effort)
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ASSETS="framexshot_${{ env.APP_VERSION }}_x86_64.pkg.tar.zst"
+          if [ -f "framexshot_${{ env.APP_VERSION }}_x86_64.pkg.tar.zst.sig" ]; then
+            ASSETS="$ASSETS framexshot_${{ env.APP_VERSION }}_x86_64.pkg.tar.zst.sig"
+          fi
+          gh release upload "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            $ASSETS \
+            --clobber || echo "Arch package upload failed; release was still published."
+
+  # ── Publish draft → public release ───────────────────────────────────────
+  # Publishes as soon as the native build matrix succeeds. Flatpak is
+  # best-effort (continue-on-error) and uploads separately when ready.
+  publish:
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: always() && needs.build.result == 'success'
+    steps:
+      - name: Publish Release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: releases } = await github.rest.repos.listReleases({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+
+            const tagName = context.ref.replace('refs/tags/', '');
+            const draftRelease = releases.find(r => r.draft && r.tag_name === tagName);
+
+            if (draftRelease) {
+              await github.rest.repos.updateRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: draftRelease.id,
+                draft: false,
+              });
+              console.log(`Published release: ${draftRelease.html_url}`);
+            } else {
+              console.log(`No draft release found for tag: ${tagName}`);
+            }

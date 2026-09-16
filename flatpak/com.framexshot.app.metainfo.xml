@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.framexshot.app</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>BSD-3-Clause</project_license>
+  <name>FrameXShot</name>
+  <summary>Fast, beautiful screenshot tool for Linux</summary>
+  <description>
+    <p>
+      FrameXShot is a fast, privacy-first screenshot tool for Linux. Capture a
+      region, the full screen, a window or live OCR — then frame, annotate and
+      polish the shot with backgrounds, effects and callouts before saving it
+      to disk or copying it to the clipboard.
+    </p>
+    <p>
+      Everything runs locally: no cloud, no telemetry. Capture works on GNOME,
+      KDE Plasma, COSMIC, wlroots compositors (Sway/Hyprland) and X11 desktops
+      via automatic desktop-aware fallback chains.
+    </p>
+  </description>
+  <developer_name>sahil singh</developer_name>
+  <url type="homepage">https://github.com/sahilcodexx/framexshot</url>
+  <url type="bugtracker">https://github.com/sahilcodexx/framexshot/issues</url>
+  <url type="vcs-browser">https://github.com/sahilcodexx/framexshot</url>
+  <launchable type="desktop-id">com.framexshot.app.desktop</launchable>
+  <provides>
+    <binary>framexshot</binary>
+  </provides>
+  <categories>
+    <category>Graphics</category>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>screenshot</keyword>
+    <keyword>capture</keyword>
+    <keyword>screen</keyword>
+    <keyword>region</keyword>
+    <keyword>annotate</keyword>
+    <keyword>ocr</keyword>
+  </keywords>
+  <releases>
+    <release version="1.1.0" date="2026-09-03">
+      <description>
+        <p>Re-adds the StyleSelector to the Border section in the right sidebar. Eight frame styles are now available: Plain, Frosted (light frosted-glass like iOS sheets), Smoky (dark smoky-glass), Glow (warm orange edge glow), Raised (soft white photo mat), Carved (dark recessed frame), Outline (thin white trace), and Frame (bold picture frame). When a non-default style is selected, padding and opacity sliders appear to fine-tune the look. The chosen style, padding, and opacity persist via the top-of-sidebar "Set as Default" button. Existing capture chain (grim/slurp/hyprctl on Hyprland) and Linux install paths (Arch .pkg.tar.zst GPG-signed, .deb, .rpm, .flatpak, .dmg, .exe) are unchanged.</p>
+      </description>
+    </release>
+    <release version="1.0.0" date="2026-09-02">
+      <description>
+        <p>First proper release. Capture works end-to-end on CachyOS / Arch / Hyprland via system grim+slurp+hyprctl (no Flatpak sandbox, no portal). Native Arch .pkg.tar.zst is the recommended install path; .deb and .rpm available for Debian/Ubuntu and Fedora. AppImage was dropped because Tauri's bundled linuxdeploy ships binutils 2.35 which can't process CachyOS-era libraries with .relr.dyn relocations. The Flatpak still ships as a universal-fallback for non-Arch distros.</p>
+      </description>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

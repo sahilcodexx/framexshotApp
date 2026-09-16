@@ -1,0 +1,97 @@
+# Maintainer: sahilcodex <sahil171759@gmail.com>
+# Contributor: FrameXShot Contributors
+#
+# Arch User Repository package for FrameXShot.
+# Builds from the GitHub source tarball so the binary is compiled against
+# your system libs (webkit2gtk-4.1 etc.) — no AppImage/Flatpak bundling.
+# On Hyprland, capture uses grim+slurp / hyprctl directly (no portal sandbox).
+#
+# Submit to AUR:  git push aur@aur.archlinux.org:framexshot
+# Install:        yay -S framexshot   (or: paru -S framexshot)
+#
+# Keep in sync with packaging/arch/PKGBUILD (same recipe, tarball source URL).
+
+pkgname=framexshot
+pkgver=1.1.0
+pkgrel=1
+pkgdesc="Beautiful, effortless screenshot tool for Linux — capture regions, screens, windows or text (OCR), then edit them with frames, backgrounds, effects and annotations."
+arch=('x86_64' 'aarch64')
+url="https://github.com/sahilcodexx/framexshot"
+license=('MIT')
+depends=(
+  'webkit2gtk-4.1'
+  'gtk3'
+  'libsoup3'
+  'libappindicator-gtk3'
+  'tesseract'
+  'grim'
+  'slurp'
+  'wl-clipboard'
+  'xclip'
+  'xsel'
+  'xdg-desktop-portal'
+  'zenity'
+  'kdialog'
+  'xdotool'
+)
+makedepends=(
+  'base-devel'
+  'nodejs'
+  'rust'
+  'cargo'
+  'pkgconf'
+  'glib2'
+  'librsvg'
+  'openssl'
+)
+optdepends=(
+  'pnpm: frontend build tool (or use npm-installed pnpm / corepack)'
+  'appmenu-gtk-module: global menu integration in some desktop environments'
+  'hyprshot: Hyprland region/window capture helper'
+  'hyprland-contrib: grimblast wrapper for Hyprland capture'
+  'xdg-desktop-portal-hyprland: Hyprland portal backend (clipboard/dialog fallbacks)'
+  'spectacle: KDE Plasma capture support'
+  'scrot: X11 capture fallback'
+  'maim: X11 region capture fallback'
+  'cosmic-screenshot: COSMIC desktop capture support'
+)
+source=("$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')  # run updpkgsums before publishing to AUR
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+
+  if ! command -v pnpm >/dev/null; then
+    echo "ERROR: pnpm not found on PATH."
+    echo "  sudo pacman -S pnpm          # if no npm pnpm installed"
+    echo "  npm install -g pnpm          # or via npm/corepack"
+    exit 1
+  fi
+
+  pnpm install --frozen-lockfile
+  pnpm tauri build --no-bundle
+
+  if ! strings "src-tauri/target/release/framexshot" | grep -q '/assets/index-'; then
+    echo "ERROR: Frontend assets were not embedded into the release binary."
+    exit 1
+  fi
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+
+  install -Dm755 "src-tauri/target/release/framexshot" \
+    "$pkgdir/usr/bin/framexshot"
+
+  install -Dm644 "src-tauri/icons/128x128.png" \
+    "$pkgdir/usr/share/icons/hicolor/128x128/apps/com.framexshot.app.png"
+  install -Dm644 "src-tauri/icons/32x32.png" \
+    "$pkgdir/usr/share/icons/hicolor/32x32/apps/com.framexshot.app.png"
+  install -Dm644 "src-tauri/icons/icon.png" \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/com.framexshot.app.png"
+
+  install -Dm644 "flatpak/com.framexshot.app.desktop" \
+    "$pkgdir/usr/share/applications/com.framexshot.app.desktop"
+  install -Dm644 "flatpak/com.framexshot.app.metainfo.xml" \
+    "$pkgdir/usr/share/metainfo/com.framexshot.app.metainfo.xml"
+}

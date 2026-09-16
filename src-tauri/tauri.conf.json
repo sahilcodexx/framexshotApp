@@ -1,0 +1,104 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "framexshot",
+  "version": "1.1.0",
+  "identifier": "com.framexshot.app",
+  "build": {
+    "beforeDevCommand": "pnpm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self' tauri: http://tauri.localhost https://tauri.localhost; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost https://asset.localhost asset://* data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost http://tauri.localhost https://tauri.localhost; frame-src 'none'; object-src 'none'; base-uri 'self'; media-src 'self' data: blob:; prefetch-src 'self'; form-action 'none'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$TEMP/**",
+          "$PICTURES/**",
+          "$HOME/Pictures/**",
+          "$APPDATA/**",
+          "$DESKTOP/**",
+          "$HOME/Desktop/**",
+          "/tmp/**",
+          "/var/tmp/**",
+          "/private/tmp/**",
+          "/run/user/**",
+          "$TEMP/**"
+        ]
+      }
+    },
+    "withGlobalTauri": false
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "rpm", "dmg", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "category": "Utility",
+    "shortDescription": "Beautiful, effortless screenshot tool for Linux",
+    "longDescription": "FrameXShot is a fast, beautiful screenshot tool for Linux. Capture regions, screens, windows or text (OCR), then edit them right away: frames, backgrounds, effects, annotations — and save or copy to clipboard.",
+    "copyright": "© 2026 FrameXShot Contributors",
+    "homepage": "https://github.com/sahilcodexx/framexshot",
+    "linux": {
+      "deb": {
+        "depends": [
+          "libgtk-3-0",
+          "libwebkit2gtk-4.1-0",
+          "libjavascriptcoregtk-4.1-0",
+          "libsoup-3.0-0",
+          "libayatana-appindicator3-1 | libappindicator3-1",
+          "tesseract-ocr"
+        ],
+        "recommends": [
+          "grim",
+          "slurp",
+          "spectacle",
+          "scrot",
+          "maim",
+          "wl-clipboard",
+          "xclip",
+          "xsel",
+          "zenity",
+          "kdialog",
+          "xdotool",
+          "xdg-desktop-portal",
+          "xdg-utils"
+        ]
+      },
+      "rpm": {
+        "depends": [
+          "gtk3",
+          "libsoup3",
+          "(webkit2gtk4.1 or webkit2gtk4-1)",
+          "(libayatana-appindicator or libappindicator-gtk3)",
+          "(tesseract or tesseract-ocr)"
+        ],
+        "recommends": [
+          "grim",
+          "slurp",
+          "spectacle",
+          "scrot",
+          "maim",
+          "wl-clipboard",
+          "xclip",
+          "xsel",
+          "zenity",
+          "kdialog",
+          "xdotool",
+          "xdg-desktop-portal",
+          "xdg-utils"
+        ]
+      }
+    }
+  }
+}
