@@ -1,7 +1,7 @@
 [package]
 name = "framexshot"
 version = "1.1.0"
-description = "FrameXShot — Linux screenshot tool"
+description = "FrameXShot — screenshot tool with a beautiful editor"
 authors = ["Sahil Singh"]
 edition = "2021"
 
@@ -30,6 +30,8 @@ xcap = { version = "0.8", default-features = false }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 arboard = "3"
+# Native folder picker for `select_folder_dialog` — zenity/kdialog are Linux-only.
+tauri-plugin-dialog = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # D-Bus capture fallbacks: xdg-desktop-portal Screenshot + GNOME Shell
@@ -38,6 +40,18 @@ zbus = "5"
 url = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# `wgc` switches xcap's Windows backend from the GDI path (BitBlt off the screen
+# DC) to Windows.Graphics.Capture. The GDI path cannot read hardware-overlay /
+# flip-model surfaces, so GPU-composited windows — browsers, Electron apps,
+# video players, games — came back as a fully black image. WGC reads the
+# composition surface and captures them correctly.
+#
+# Cost: WGC needs Windows 10 1903 (build 18362) or newer, and on Windows 10 it
+# draws a yellow border around the captured surface while capturing. Windows 11
+# and `xcap` >= 0.8 suppress the border where the OS allows it. Cargo unifies
+# features across dependency tables, so this adds `wgc` on top of the base
+# `xcap` entry above rather than replacing it.
+xcap = { version = "0.8", default-features = false, features = ["wgc"] }
 winapi = { version = "0.3", features = [
     "winuser",
     "wingdi",
