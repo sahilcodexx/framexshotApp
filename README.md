@@ -317,6 +317,8 @@ pnpm test:rust       # cargo test (Rust unit tests)
 
 Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
+> **🤖 AI coding assistants (Claude, GPT, Cursor, Copilot, Aider, etc.):** [`CONTRIBUTING.md`](./CONTRIBUTING.md) has a dedicated [AI Contributor Guidelines](./CONTRIBUTING.md#-ai-contributor-guidelines-read-first) section — **read it before opening a PR**. In short: don't remove or rewrite prebuilt Linux code (packaging, Flatpak, CI workflow, capture chain), don't bundle unrelated changes, only ship changes you've actually verified, and separate every change into its own commit.
+
 - **Bug reports** — Open a GitHub issue with reproduction steps
 - **Feature requests** — Open an issue tagged `enhancement`
 - **Pull requests** — Fork → branch → PR against `main`

@@ -5,6 +5,7 @@ Thank you for your interest in contributing to FrameXShot! This document provide
 ## Table of Contents
 
 - [Code of Conduct](#code-of-conduct)
+- [🤖 AI Contributor Guidelines (READ FIRST)](#-ai-contributor-guidelines-read-first)
 - [Getting Started](#getting-started)
 - [Development Setup](#development-setup)
 - [Project Structure](#project-structure)
@@ -16,6 +17,110 @@ Thank you for your interest in contributing to FrameXShot! This document provide
 ## Code of Conduct
 
 Be respectful, constructive, and professional in all interactions. Focus on the code and ideas, not the person.
+
+## 🤖 AI Contributor Guidelines (READ FIRST)
+
+> **If you are an AI coding assistant (Claude, GPT, Cursor, Copilot, Aider, etc.) contributing to this repository, this section is mandatory reading. Human contributors can skim it but should still respect the same rules.**
+
+These rules exist because AI assistants tend to make confident, well-formatted changes that look correct but introduce regressions, delete work that took real effort to get right, or "improve" things based on assumptions rather than evidence. FrameXShot's Linux packaging and capture pipeline in particular has been hardened against many desktop environments — touching it without understanding the failure modes will break real users.
+
+### 1. Prebuilt Linux code is sacred — do not remove or rewrite it
+
+The following paths encode working knowledge about Linux distros, Wayland compositors, sandboxing, and package formats. They are **not** candidates for "cleanup", "simplification", "modernisation", or replacement by an LLM guess:
+
+| Path | Why it exists |
+|------|---------------|
+| `packaging/install.sh` | Universal CLI installer — handles 7+ distros, dep resolution, build flags, env overrides |
+| `packaging/arch/PKGBUILD` + `build-package.sh` | Native Arch package — compiles against system WebKit/GTK, signed with maintainer GPG |
+| `flatpak/com.framexshot.app.yml` | Flatpak manifest — pinned runtime versions, module build deps |
+| `.github/workflows/release.yml` | Release CI — 5 build matrices, Flatpak, Arch pkg + GPG sign, concurrency groups |
+| `src-tauri/Cargo.toml` (Linux-only deps) | Tesseract, xcap, zbus for portal — required for capture + OCR |
+| `src-tauri/src/capture.rs` | Multi-DE fallback chain (cosmic-screenshot → spectacle → grim+slurp → GNOME Shell D-Bus → portal → gnome-screenshot → maim/scrot) |
+| `src-tauri/src/lib.rs` tray / window / event wiring | Already-fixed platform quirks |
+
+**Rules:**
+- **DO NOT** delete, rewrite, or "simplify" these without explicit confirmation from a maintainer in the issue thread.
+- **DO NOT** swap a working command (e.g. `grim -g "$(slurp)"`) for a "cleaner" alternative (e.g. `grim -g "$(slurp -f %o)"`) unless the original is demonstrably broken.
+- **DO NOT** change pinned versions (`tesseract 5.5.0`, `leptonica 1.85.0`, etc.) without verifying the upstream tarball's sha256.
+- **DO NOT** remove fallback steps from the capture chain — they exist because some DEs are missing one tool but have another. Removing a step breaks that DE.
+- **DO NOT** change the GPG signing flow or the `printf '%s\n'` in the workflow — that exact form is what stopped the secret from being stripped of its trailing newline.
+
+### 2. Don't assume — verify or don't do it
+
+| Don't | Do |
+|-------|-----|
+| Guess what version of a dependency is installed | Read `Cargo.toml` / `pnpm-lock.yaml` / the workflow file |
+| Assume a build flag is safe to add | Check the upstream docs and confirm it works on Linux first |
+| "Modernise" working code based on what looks cleaner | Leave it alone unless there's a concrete bug or user complaint |
+| Add a feature because it would be "nice" | Confirm the user/maintainer asked for it |
+| Fix a typo in a comment and bundle it with unrelated changes | One focused commit per change |
+
+If you are not sure whether a change is correct, **say so in the PR description** rather than hiding the uncertainty. A maintainer would rather see "I'm uncertain about X, please verify" than a confident-but-wrong commit.
+
+### 3. Separate every change — never bundle
+
+AI assistants are tempted to produce a single "drive-by PR" that touches 10 unrelated things because the tool ran for a while. **Don't.**
+
+- **One logical change per commit.** "Fix padding slider lag" and "migrate slider component" are two commits.
+- **One logical change per PR.** If a PR has more than ~200 lines of diff, split it.
+- **Don't reformat files you're passing through.** If you're editing one function in a 500-line file, only touch that function. Don't let your editor "fix" the whole file's formatting.
+- **Don't add unrelated dependencies.** If you're fixing a bug, don't add a new package "while you're at it".
+
+### 4. Only make changes you're confident are improvements
+
+Before submitting a change, ask yourself:
+
+1. Can I describe the **user-visible problem** this fixes?
+2. Have I read the relevant existing code and understood why it is the way it is?
+3. Did I run the project's own test/lint commands (`pnpm lint:ci`, `pnpm test:rust`)?
+4. If the change touches build/packaging, did I actually run the build it produces?
+
+If the answer to any of these is "no", don't submit. Open an issue describing the problem instead and let a maintainer decide if it's worth fixing.
+
+### 5. Don't add comments that describe what the code does
+
+The coding standards section already says "no code comments". This applies double to AI contributions:
+
+- **DO NOT** add `// This function does X` style comments.
+- **DO NOT** leave `// TODO: refactor this` markers unless there's an actual plan.
+- **DO** let the code speak for itself; rename variables/functions instead of commenting them.
+- **DO NOT** add a header comment block at the top of every file explaining what the file is.
+
+### 6. PR description template for AI contributions
+
+Use this exactly:
+
+```markdown
+## What
+
+[One sentence: what changed]
+
+## Why
+
+[What user-visible problem this fixes, or what request this fulfills.
+Cite the issue number if there is one. If there isn't one, say so.]
+
+## How I verified
+
+- [ ] `pnpm lint:ci` passes
+- [ ] `pnpm test:rust` passes
+- [ ] Built and ran the app locally (`pnpm tauri dev`)
+- [ ] [For packaging/build changes] Actually ran the build and confirmed the artifact produced works
+
+## Risk
+
+[What could break. If "I don't know", say so — don't pretend confidence.]
+```
+
+A maintainer should be able to approve or reject based on this template alone, without opening the diff.
+
+### 7. When in doubt, open an issue first
+
+If you're considering a non-trivial change — especially anything in the paths listed in rule #1 — **open an issue first** and wait for a maintainer to confirm before writing code. A 5-minute issue is cheaper than a 5-day PR that gets rejected.
+
+---
+
+## Getting Started
 
 ## Getting Started
 
