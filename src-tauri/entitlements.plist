@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the signed macOS build.
+
+  Notarization requires the hardened runtime, and the hardened runtime blocks
+  several things WebKit needs by default. Without the three JIT/memory
+  entitlements below a notarized FrameXShot launches to a blank window and the
+  WebKit subprocess dies immediately — the classic symptom of a Tauri/Electron
+  app signed with hardened runtime and no JIT entitlement.
+
+  Deliberately NOT sandboxed (no com.apple.security.app-sandbox). The app writes
+  screenshots to user-chosen directories and captures the whole screen; under
+  the App Sandbox both would require entitlements only granted to Mac App Store
+  submissions, and this app is distributed directly as a DMG.
+-->
+<plist version="1.0">
+<dict>
+    <!-- WebKit JIT-compiles JavaScript. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- JavaScriptCore allocates W+X pages for the JIT. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- WebKit maps executable pages it wrote itself. -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+
+    <!-- Allows loading the WebKit/system frameworks the webview dlopen()s. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

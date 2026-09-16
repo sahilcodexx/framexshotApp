@@ -45,10 +45,15 @@
       "icons/icon.png"
     ],
     "category": "Utility",
-    "shortDescription": "Beautiful, effortless screenshot tool for Linux",
-    "longDescription": "FrameXShot is a fast, beautiful screenshot tool for Linux. Capture regions, screens, windows or text (OCR), then edit them right away: frames, backgrounds, effects, annotations — and save or copy to clipboard.",
+    "shortDescription": "Beautiful, effortless screenshot tool for Windows, Linux and macOS",
+    "longDescription": "FrameXShot is a fast, beautiful screenshot tool for Windows, Linux and macOS. Capture regions, screens, windows or text (OCR), then edit them right away: frames, backgrounds, effects, annotations — and save or copy to clipboard.",
     "copyright": "© 2026 FrameXShot Contributors",
     "homepage": "https://github.com/sahilcodexx/framexshot",
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "hardenedRuntime": true,
+      "entitlements": "entitlements.plist"
+    },
     "linux": {
       "deb": {
         "depends": [
