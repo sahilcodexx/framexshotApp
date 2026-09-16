@@ -1,13 +1,92 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
+import { isWindows } from "@/lib/platform";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const appWindow = getCurrentWindow();
+
+/**
+ * Mirrors `ResizeDirection` from `@tauri-apps/api/window`.
+ *
+ * That module declares the union locally but does **not** export it (checked
+ * against `@tauri-apps/api` 2.11.1), so it cannot be imported. This is the
+ * identical literal union, and because TypeScript types are structural,
+ * `startResizeDragging` accepts it unchanged.
+ */
+type ResizeDirection =
+  | "East"
+  | "North"
+  | "NorthEast"
+  | "NorthWest"
+  | "South"
+  | "SouthEast"
+  | "SouthWest"
+  | "West";
 
 interface TitleBarProps {
   /** Optional controls (e.g. Cancel / Copy / Export) rendered on the right
    *  side of the bar. Buttons are still clickable because Tauri only treats
    *  the empty area of the drag region as draggable. */
   rightActions?: ReactNode;
+}
+
+const RESIZE_EDGE = 5;
+const RESIZE_CORNER = 12;
+
+/**
+ * Windows-only resize handles.
+ *
+ * The main window is created with `decorations(false)`. On GTK the compositor
+ * still lets the user resize such a window from its edges, but Windows has no
+ * native frame to grab at all — without these strips a `decorations(false)`
+ * window can never be resized. They are invisible: their only job is to call
+ * `startResizeDragging` on mousedown.
+ *
+ * They use `position: fixed` so they are laid out against the real window edges
+ * rather than the 32px bar they are rendered from — the window bottom is far
+ * outside the bar, so an `absolute` handle could never reach it.
+ *
+ * Layering / non-interference:
+ *  - `z-20` (edges) / `z-30` (corners) clears the editor canvas wrapper (`z-10`)
+ *    so the strips actually receive mouse events, while staying below the
+ *    floating toolbars and dialogs (`z-50`), which never sit on a window edge.
+ *  - The bar has `px-3` (12px), so the traffic-light buttons start at x=12 and
+ *    `rightActions` ends at x=width-12. The 5px edges and 12px corners stay
+ *    strictly outside that content box and cannot intercept their clicks.
+ *  - The strips carry no `data-tauri-drag-region`, so Tauri's drag handler
+ *    (which matches on the event target itself) never treats them as draggable.
+ */
+const WINDOW_RESIZE_HANDLES: { direction: ResizeDirection; style: CSSProperties }[] = [
+  { direction: "North", style: { top: 0, left: 0, right: 0, height: RESIZE_EDGE, cursor: "ns-resize", zIndex: 20 } },
+  { direction: "South", style: { bottom: 0, left: 0, right: 0, height: RESIZE_EDGE, cursor: "ns-resize", zIndex: 20 } },
+  { direction: "West", style: { top: 0, bottom: 0, left: 0, width: RESIZE_EDGE, cursor: "ew-resize", zIndex: 20 } },
+  { direction: "East", style: { top: 0, bottom: 0, right: 0, width: RESIZE_EDGE, cursor: "ew-resize", zIndex: 20 } },
+  { direction: "NorthWest", style: { top: 0, left: 0, width: RESIZE_CORNER, height: RESIZE_CORNER, cursor: "nwse-resize", zIndex: 30 } },
+  { direction: "NorthEast", style: { top: 0, right: 0, width: RESIZE_CORNER, height: RESIZE_CORNER, cursor: "nesw-resize", zIndex: 30 } },
+  { direction: "SouthWest", style: { bottom: 0, left: 0, width: RESIZE_CORNER, height: RESIZE_CORNER, cursor: "nesw-resize", zIndex: 30 } },
+  { direction: "SouthEast", style: { bottom: 0, right: 0, width: RESIZE_CORNER, height: RESIZE_CORNER, cursor: "nwse-resize", zIndex: 30 } },
+];
+
+function WindowsResizeHandles() {
+  return (
+    <>
+      {WINDOW_RESIZE_HANDLES.map(({ direction, style }) => (
+        <div
+          key={direction}
+          aria-hidden="true"
+          className="fixed"
+          style={{ position: "fixed", ...style }}
+          onMouseDown={(e) => {
+            if (e.button !== 0) return;
+            // Keep the event away from Tauri's document-level drag-region
+            // listener and stop any text selection from starting.
+            e.preventDefault();
+            e.stopPropagation();
+            void appWindow.startResizeDragging(direction);
+          }}
+        />
+      ))}
+    </>
+  );
 }
 
 export function TitleBar({ rightActions }: TitleBarProps) {
@@ -116,6 +195,10 @@ export function TitleBar({ rightActions }: TitleBarProps) {
           {rightActions}
         </div>
       )}
+
+      {/* Windows-only: invisible edge/corner strips that restore resizing on a
+          frameless window. Linux and macOS render nothing here. */}
+      {isWindows && <WindowsResizeHandles />}
     </div>
   );
 }

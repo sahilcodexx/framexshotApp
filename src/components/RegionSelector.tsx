@@ -18,55 +18,6 @@ export function RegionSelector() {
   const imgRef = useRef<HTMLImageElement | null>(null);
   const [tick, setTick] = useState(0);
 
-  // Load screenshot on mount + every time the window is re-shown
-  const loadScreenshot = useCallback(() => {
-    setReady(false);
-    selectionRef.current = null;
-    isSelectingRef.current = false;
-
-    invoke<string>("capture_screen_for_selector")
-      .then((base64Data) => {
-        const img = new Image();
-        img.onload = () => {
-          imgRef.current = img;
-          draw(img, null);
-          setReady(true);
-        };
-        img.onerror = (e) => console.error("Failed to load base64 screenshot", e);
-        img.src = base64Data;
-      })
-      .catch((err) => console.error("capture_screen_for_selector failed:", err));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Do NOT capture on mount — the region-selector window is pre-created (hidden)
-  // at app startup. Loading a screenshot here would call xdg-desktop-portal /
-  // grim on every launch (and shows GDBus NotAllowed inside Flatpak).
-  // Capture only when the window is actually shown (focus / visibility / reload).
-
-  // Listen to explicit backend signal and focus changes for when window is re-shown
-  useEffect(() => {
-    const unlistenEvent = listen("reload-selector-screenshot", () => {
-      loadScreenshot();
-    });
-    const unlistenFocus = getCurrentWindow().onFocusChanged((focused) => {
-      if (focused) {
-        loadScreenshot();
-      }
-    });
-    const handleVisibility = () => {
-      if (document.visibilityState === "visible") {
-        loadScreenshot();
-      }
-    };
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => {
-      unlistenEvent.then((f) => f());
-      unlistenFocus.then((f) => f());
-      document.removeEventListener("visibilitychange", handleVisibility);
-    };
-  }, [loadScreenshot]);
-
   const draw = useCallback((img: HTMLImageElement, sel: SelectionRect | null) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -123,9 +74,56 @@ export function RegionSelector() {
     ctx.textAlign = "left";
   }, []);
 
+  // `tick` is the dependency on purpose: the selection lives in a ref (so that
+  // mousemove does not re-render on every pixel) and `tick` is the explicit
+  // signal that the ref changed and a redraw is due.
+  const loadScreenshot = useCallback(() => {
+    setReady(false);
+    selectionRef.current = null;
+    isSelectingRef.current = false;
+
+    invoke<string>("capture_screen_for_selector")
+      .then((base64Data) => {
+        const img = new Image();
+        img.onload = () => {
+          imgRef.current = img;
+          draw(img, null);
+          setReady(true);
+        };
+        img.onerror = (e) => console.error("Failed to load base64 screenshot", e);
+        img.src = base64Data;
+      })
+      .catch((err) => console.error("capture_screen_for_selector failed:", err));
+  }, [draw]);
+
+  // Do NOT capture on mount — the region-selector window is pre-created (hidden)
+  // at app startup. Loading a screenshot here would call xdg-desktop-portal /
+  // grim on every launch (and shows GDBus NotAllowed inside Flatpak).
+  // Capture only when the window is actually shown (focus / visibility / reload).
+  useEffect(() => {
+    const unlistenEvent = listen("reload-selector-screenshot", () => {
+      loadScreenshot();
+    });
+    const unlistenFocus = getCurrentWindow().onFocusChanged((focused) => {
+      if (focused) {
+        loadScreenshot();
+      }
+    });
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        loadScreenshot();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      unlistenEvent.then((f) => f());
+      unlistenFocus.then((f) => f());
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [loadScreenshot]);
+
   useEffect(() => {
     if (imgRef.current) draw(imgRef.current, selectionRef.current);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick, draw]);
 
   const onMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {

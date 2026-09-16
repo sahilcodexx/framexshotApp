@@ -4,12 +4,13 @@ import { Card, CardContent } from "@/components/ui/card";
 import { OnboardingStep } from "./OnboardingStep";
 import { OnboardingProgress } from "./OnboardingProgress";
 import { markOnboardingComplete } from "@/lib/onboarding";
+import { isMac } from "@/lib/platform";
 
 interface OnboardingFlowProps {
   onComplete: () => void;
 }
 
-const ONBOARDING_STEPS = [
+const ALL_ONBOARDING_STEPS = [
   {
     id: "welcome",
     title: "Welcome to FrameXShot",
@@ -319,6 +320,10 @@ const ONBOARDING_STEPS = [
     ),
   },
 ];
+
+const ONBOARDING_STEPS = isMac
+  ? ALL_ONBOARDING_STEPS
+  : ALL_ONBOARDING_STEPS.filter((step) => step.id !== "permissions");
 
 export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
   const [currentStep, setCurrentStep] = useState(0);

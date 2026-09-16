@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Plus, Trash2, Terminal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { isLinux, isMac } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 
 export interface KeyboardShortcut {
@@ -24,7 +25,11 @@ const DEFAULT_SHORTCUTS: KeyboardShortcut[] = [
   { id: "ocr", action: "OCR Region", shortcut: "CommandOrControl+Shift+O", enabled: false },
 ];
 
-const isMac = typeof navigator !== "undefined" && /Mac|iPod|iPhone|iPad/.test(navigator.userAgent);
+// The Xwayland keyboard-grab release is a Linux/Wayland concern only; other
+// platforms just stop registering the hotkeys.
+const DISABLED_HOTKEYS_HINT = isLinux
+  ? "Disabled — Xwayland keyboard grab released for Hyprland/Wayland"
+  : "Disabled — global hotkeys are not registered";
 
 function formatShortcut(shortcut: string): string {
   if (isMac) {
@@ -104,6 +109,16 @@ export function KeyboardShortcutManager({ onShortcutsChange }: KeyboardShortcutM
   const recordedShortcutRef = useRef<string | null>(null);
   const recordingRef = useRef<HTMLButtonElement>(null);
 
+  // Hold the latest `onShortcutsChange` in a ref so the mount effect below can
+  // call it without depending on it. The parent passes an inline function, so a
+  // real dependency would change identity on every parent render and re-run the
+  // load — re-reading the store and firing the callback in a loop. Keeping the
+  // ref in sync means the effect always invokes the current prop.
+  const onShortcutsChangeRef = useRef(onShortcutsChange);
+  useEffect(() => {
+    onShortcutsChangeRef.current = onShortcutsChange;
+  }, [onShortcutsChange]);
+
   // Load shortcuts & global hotkeys toggle on mount
   useEffect(() => {
     const loadShortcuts = async () => {
@@ -123,10 +138,10 @@ export function KeyboardShortcutManager({ onShortcutsChange }: KeyboardShortcutM
           });
 
           setShortcuts(mergedShortcuts);
-          onShortcutsChange?.(mergedShortcuts);
+          onShortcutsChangeRef.current?.(mergedShortcuts);
         } else {
           setShortcuts(DEFAULT_SHORTCUTS);
-          onShortcutsChange?.(DEFAULT_SHORTCUTS);
+          onShortcutsChangeRef.current?.(DEFAULT_SHORTCUTS);
         }
       } catch (err) {
         console.error("Failed to load shortcuts:", err);
@@ -141,7 +156,13 @@ export function KeyboardShortcutManager({ onShortcutsChange }: KeyboardShortcutM
       const store = await Store.load("settings.json");
       await store.set("enableGlobalHotkeys", checked);
       await store.save();
-      toast.success(checked ? "App global hotkeys enabled" : "Global hotkeys disabled (Xwayland grab released)");
+      toast.success(
+        checked
+          ? "App global hotkeys enabled"
+          : isLinux
+          ? "Global hotkeys disabled (Xwayland grab released)"
+          : "Global hotkeys disabled"
+      );
     } catch (err) {
       console.error("Failed to save global hotkey toggle:", err);
     }
@@ -275,7 +296,7 @@ export function KeyboardShortcutManager({ onShortcutsChange }: KeyboardShortcutM
             <p className="text-[11px] text-muted-foreground">
               {enableGlobalHotkeys
                 ? "Listening for global key combinations"
-                : "Disabled — Xwayland keyboard grab released for Hyprland/Wayland"}
+                : DISABLED_HOTKEYS_HINT}
             </p>
           </div>
           <Switch
@@ -285,19 +306,21 @@ export function KeyboardShortcutManager({ onShortcutsChange }: KeyboardShortcutM
           />
         </div>
 
-        {/* Hyprland / Wayland Native Binding Hint */}
-        <div className="p-2.5 bg-[#1a1f26] border border-[#2a3442] rounded-lg text-[11px] text-[#93c5fd] flex items-start gap-2 mt-2">
-          <Terminal className="size-4 text-[#60a5fa] shrink-0 mt-0.5" />
-          <div className="space-y-1">
-            <p className="font-medium text-[#bfdbfe]">Hyprland / Wayland Binds:</p>
-            <p className="text-[#93c5fd]/90 font-mono text-[10px] bg-[#0f172a] px-2 py-1 rounded border border-[#1e293b]">
-              bind = $mainMod SHIFT, 2, exec, framexshot --capture-region
-            </p>
-            <p className="text-[#93c5fd]/80 text-[10px]">
-              If Hyprland keybinds stop when opening FrameXShot, turn off "App Global Hotkeys" above to prevent Xwayland grabs, and add <code className="bg-[#0f172a] px-1 py-0.5 rounded font-mono">framexshot --capture-region</code> directly to hyprland.conf!
-            </p>
+        {/* Hyprland / Wayland Native Binding Hint — Linux only */}
+        {isLinux && (
+          <div className="p-2.5 bg-[#1a1f26] border border-[#2a3442] rounded-lg text-[11px] text-[#93c5fd] flex items-start gap-2 mt-2">
+            <Terminal className="size-4 text-[#60a5fa] shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="font-medium text-[#bfdbfe]">Hyprland / Wayland Binds:</p>
+              <p className="text-[#93c5fd]/90 font-mono text-[10px] bg-[#0f172a] px-2 py-1 rounded border border-[#1e293b]">
+                bind = $mainMod SHIFT, 2, exec, framexshot --capture-region
+              </p>
+              <p className="text-[#93c5fd]/80 text-[10px]">
+                If Hyprland keybinds stop when opening FrameXShot, turn off "App Global Hotkeys" above to prevent Xwayland grabs, and add <code className="bg-[#0f172a] px-1 py-0.5 rounded font-mono">framexshot --capture-region</code> directly to hyprland.conf!
+              </p>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       <div className="flex items-center justify-between pt-2">
