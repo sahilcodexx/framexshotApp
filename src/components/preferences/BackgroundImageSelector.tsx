@@ -221,7 +221,10 @@ export function BackgroundImageSelector({ onImageSelect }: BackgroundImageSelect
 
       event.target.value = "";
     },
-    [uploadedImages]
+    // `handleImageSelect` is called from the FileReader onload below, so it is a
+    // real dependency. It is itself a useCallback over [onImageSelect], so this
+    // only re-creates the handler when the parent's callback identity changes.
+    [uploadedImages, handleImageSelect]
   );
 
   const handleRemoveUploaded = useCallback(

@@ -235,11 +235,16 @@ const WallpaperThumb = memo(function WallpaperThumb({
   eager?: boolean;
 }) {
   const [thumbSrc, setThumbSrc] = useState<string>(src);
-  const [loaded, setLoaded] = useState(false);
+
+  // Record *which* src finished loading rather than a bare boolean. The boolean
+  // had to be reset to false from inside the effect on every `src` change; a
+  // comparison gives the identical result by derivation — a new `src` is
+  // not-yet-loaded automatically — with no synchronous setState in an effect.
+  const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
+  const loaded = loadedSrc === src;
 
   useEffect(() => {
     let mounted = true;
-    setLoaded(false);
     getThumbnailUrl(src, 140).then((url) => {
       if (mounted) setThumbSrc(url);
     });
@@ -267,7 +272,7 @@ const WallpaperThumb = memo(function WallpaperThumb({
         alt={name}
         loading={eager ? "eager" : "lazy"}
         decoding="async"
-        onLoad={() => setLoaded(true)}
+        onLoad={() => setLoadedSrc(src)}
         className={cn(
           "h-full w-full object-cover transition-opacity duration-[var(--duration-fast)] ease-[var(--ease-smooth-out)]",
           loaded ? "opacity-100" : "opacity-0"

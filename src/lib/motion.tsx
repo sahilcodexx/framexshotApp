@@ -44,11 +44,21 @@ export function Reveal({
   style,
 }: RevealProps) {
   const [shown, setShown] = useState(false);
-  const [reduceMotion, setReduceMotion] = useState(false);
+
+  // Read the media query lazily during the first render rather than setting it
+  // from an effect. The effect version rendered once with `reduceMotion: false`
+  // and then immediately re-rendered with the real value, so a user who asked
+  // for reduced motion still saw the first frame of the animation they opted
+  // out of. The initialiser runs before the first paint, so the correct value is
+  // used from the start — and there is no cascading render.
+  const [reduceMotion, setReduceMotion] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
 
   useEffect(() => {
     const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
-    setReduceMotion(mq.matches);
     const onChange = (e: MediaQueryListEvent) => setReduceMotion(e.matches);
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);

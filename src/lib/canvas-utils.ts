@@ -1,4 +1,4 @@
-import type { ShadowSettings } from "@/hooks/useEditorSettings";
+import type { ShadowSettings } from "@/stores/editorStore";
 
 export interface RenderOptions {
   image: HTMLImageElement;
