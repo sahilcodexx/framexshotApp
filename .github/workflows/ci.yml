@@ -1,0 +1,135 @@
+# Quality gate for every push and pull request.
+#
+# The repo previously had only release.yml, so nothing ran the checks that
+# already existed in package.json and src-tauri — `tsc --noEmit`, vitest,
+# `cargo test` and clippy all passed locally but no push was ever verified. A
+# regression that broke region capture on Windows and macOS reached a tagged
+# release with nothing to catch it.
+#
+# Kept deliberately cheap so it runs on every push: no bundling, no installers.
+# The heavyweight cross-platform packaging stays in release.yml.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch supersedes the previous run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Frontend (typecheck, lint, test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      # `--max-warnings 0`, so warnings fail too. The tree is clean, and this is
+      # what keeps it that way — a warning nobody has to fix becomes 25 warnings
+      # nobody reads.
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Test
+        run: pnpm run test
+
+  rust:
+    name: Rust (fmt, build, clippy, test)
+    # Both platforms compile genuinely different code: the whole Linux
+    # shell-out capture chain is `cfg(target_os = "linux")`, and the xcap /
+    # overlay / mac_api paths are `cfg(not(target_os = "linux"))`. Checking only
+    # one target leaves half the backend uncompiled.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-24.04
+          - platform: windows-latest
+          - platform: macos-14
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux dependencies
+        if: contains(matrix.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libxdo-dev clang libclang-dev \
+            libpipewire-0.3-dev libgbm-dev libdrm-dev
+
+      # tauri-build reads tauri.conf.json and needs the frontendDist directory to
+      # exist. Installing + building the frontend is cheaper than special-casing it.
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm run build
+
+      # The tree was brought to rustfmt-clean before this gate was added. That
+      # reindented the Linux capture chain, which CONTRIBUTING.md marks "do not
+      # delete, rewrite, or simplify" — so it was verified token-by-token first:
+      # stripping all whitespace from capture.rs before and after formatting
+      # yields byte-identical output, i.e. not one token of the fallback chain
+      # changed. Only indentation moved.
+      - name: Check formatting
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      # The step that matters most: it compiles the arms no single developer
+      # machine can check. The Linux shell-out chain and the macOS-only code
+      # (mac_api.rs, the afplay/cursor arms) are each invisible to the other two
+      # targets.
+      - name: Build
+        working-directory: src-tauri
+        run: cargo check --all-targets
+
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test
+
+      # Blocking on every platform. Clippy is clean on Windows here; the Linux
+      # and macOS arms could not be linted locally (no sysroot, no SDK), so their
+      # first run on real runners may surface findings. That is the point of the
+      # gate — fix what it reports rather than lowering it back to advisory.
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
