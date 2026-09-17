@@ -115,6 +115,37 @@ jobs:
           # The strip in Cargo.toml [profile.release] still runs (that uses the
           # host's strip, which is new enough on the Ubuntu 24.04 runner).
           NO_STRIP: "1"
+
+          # ── macOS code signing + notarization ──────────────────────────────
+          # Without these the DMG is unsigned and un-notarized, and Gatekeeper
+          # refuses to open it on any machine that did not build it — users see
+          # "FrameXShot is damaged and can't be opened. You should move it to
+          # the Bin." That is not a bug in the app; it is the unsigned-binary
+          # path, and there is no code-level workaround.
+          #
+          # tauri-action imports APPLE_CERTIFICATE into a temporary keychain and
+          # signs with APPLE_SIGNING_IDENTITY, then notarizes with the APPLE_ID
+          # credentials (or APPLE_API_* if you prefer App Store Connect keys).
+          # Every one of these is read from secrets, so when the secrets are not
+          # configured they expand to empty strings, signing is skipped, and the
+          # build behaves exactly as it does today. Nothing here breaks the
+          # Linux or Windows jobs.
+          #
+          # To turn signing on, set these repository secrets — they require a
+          # paid Apple Developer account:
+          #   APPLE_CERTIFICATE          base64 of a "Developer ID Application" .p12
+          #                              (base64 -i cert.p12 | pbcopy)
+          #   APPLE_CERTIFICATE_PASSWORD the .p12 export password
+          #   APPLE_SIGNING_IDENTITY     e.g. "Developer ID Application: Name (TEAMID)"
+          #   APPLE_ID                   your Apple ID email
+          #   APPLE_PASSWORD             an app-specific password, NOT the account password
+          #   APPLE_TEAM_ID              the 10-character team id
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'FrameXShot ${{ github.ref_name }}'
@@ -168,6 +199,13 @@ jobs:
             framexshot_${{ env.APP_VERSION }}_x64-setup.exe
             ```
 
+            **OCR is optional and not bundled.** Everything else works out of the box.
+            To enable "OCR Region", install the Tesseract engine from
+            [UB-Mannheim/tesseract](https://github.com/UB-Mannheim/tesseract/wiki)
+            and restart FrameXShot. The app detects it automatically — it probes
+            `PATH` plus the standard install locations, so ticking "Add to PATH"
+            in the Tesseract installer is not required.
+
             ### macOS (Apple Silicon)
             ```sh
             open framexshot_${{ env.APP_VERSION }}_aarch64.dmg
@@ -177,6 +215,24 @@ jobs:
             ```sh
             open framexshot_${{ env.APP_VERSION }}_x64.dmg
             ```
+
+            **macOS first-run steps**
+
+            1. **Grant Screen Recording.** On first capture macOS shows a permission
+               prompt. Open System Settings → Privacy & Security → Screen Recording,
+               enable FrameXShot, then **quit and reopen the app** — macOS caches the
+               answer for the lifetime of the process, so it does not take effect
+               until a restart. Without it, capture silently returns desktop
+               wallpaper with no windows in it.
+            2. **OCR is optional and not bundled.** For "OCR Region", run
+               `brew install tesseract` and restart FrameXShot.
+            3. **If the build is not signed** (no Apple Developer certificate
+               configured for this release), Gatekeeper reports *"FrameXShot is
+               damaged and can't be opened"*. That message is about the missing
+               signature, not a corrupt download. Clear the quarantine flag:
+               ```sh
+               xattr -cr /Applications/framexshot.app
+               ```
 
             > **Note:** AppImage builds were dropped starting v1.0.0. The Tauri-bundled `linuxdeploy` ships `strip` (binutils 2.35) which cannot process CachyOS / Arch libraries containing `.relr.dyn` RELR relocations, and rolling distros ship a different libwayland/libgbm than the AppImage bundles. Flatpak sidesteps both problems by pinning a stable runtime.
 
