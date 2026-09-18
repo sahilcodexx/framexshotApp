@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-18
+
 **Windows and macOS support.** FrameXShot now builds and runs on Windows (x86_64) and macOS alongside Linux. The capture *flow* is unchanged — what's new is the Windows/macOS capture backend and the platform-conditional UI.
 
 ### Capture — Windows
