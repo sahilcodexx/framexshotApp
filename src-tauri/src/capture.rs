@@ -217,10 +217,8 @@ pub fn capture_fullscreen(path: &Path) -> Result<(), String> {
             // give us. Outside a Flatpak the portal remains a useful fallback for
             // systems that don't have grim/slurp installed.
             #[cfg(target_os = "linux")]
-            if !is_flatpak() {
-                if portal_fullscreen(path).is_ok() {
-                    return Ok(());
-                }
+            if !is_flatpak() && portal_fullscreen(path).is_ok() {
+                return Ok(());
             }
             if has_binary("gnome-screenshot") && gnome_screenshot(path, &[]).is_ok() {
                 return Ok(());
@@ -249,10 +247,8 @@ pub fn capture_fullscreen(path: &Path) -> Result<(), String> {
         }
         // Skip the portal inside a flatpak — see comment in capture_fullscreen().
         #[cfg(target_os = "linux")]
-        if !is_flatpak() {
-            if portal_fullscreen(path).is_ok() {
-                return Ok(());
-            }
+        if !is_flatpak() && portal_fullscreen(path).is_ok() {
+            return Ok(());
         }
         if has_binary("gnome-screenshot") && gnome_screenshot(path, &[]).is_ok() {
             return Ok(());
@@ -586,7 +582,9 @@ fn gnome_screenshot(path: &Path, extra_args: &[&str]) -> Result<(), String> {
 ///
 /// 1. Missing `parent_window` argument.
 ///    The correct D-Bus signature is:
-///      Screenshot(IN s parent_window, IN a{sv} options) → OUT o handle
+///   ```text
+///   Screenshot(IN s parent_window, IN a{sv} options) → OUT o handle
+///   ```
 ///    The old code called `call_method("Screenshot", &options)` — passing
 ///    ONLY the options dict, omitting the mandatory parent_window string.
 ///
