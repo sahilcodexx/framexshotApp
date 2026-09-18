@@ -15,27 +15,38 @@ interface PropertiesPanelProps {
 export const PropertiesPanel = memo(function PropertiesPanel({ annotation, onUpdate }: PropertiesPanelProps) {
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(["color"]));
 
+  // Read the two fields the effect actually depends on into locals, so the
+  // dependency array can be honest. Depending on `annotation` itself — as the
+  // linter suggested while the body referenced the whole object — would re-run
+  // this on every mutation of the selected annotation, including each frame of a
+  // drag or resize, collapsing the panel's sections out from under the user.
+  // Only identity and type should reopen them.
+  const annotationType = annotation?.type;
+  const annotationId = annotation?.id;
+
   useEffect(() => {
-    if (!annotation) return;
-    
+    if (!annotationType) return;
+
     const newExpanded = new Set(["color"]);
-    
-    if (annotation.type === "text") {
+
+    if (annotationType === "text") {
       newExpanded.add("text");
     }
-    if (annotation.type === "line" || annotation.type === "arrow") {
+    if (annotationType === "line" || annotationType === "arrow") {
       newExpanded.add("line");
     }
-    if (annotation.type === "number") {
+    if (annotationType === "number") {
       newExpanded.add("number");
     }
-    if (annotation.type === "blur") {
+    if (annotationType === "blur") {
       newExpanded.add("blur");
       newExpanded.delete("color");
     }
-    
+
     setExpandedSections(newExpanded);
-  }, [annotation?.type, annotation?.id]);
+    // `annotationId` is intentionally a dependency without being read: switching
+    // between two annotations of the same type must still reset the sections.
+  }, [annotationType, annotationId]);
 
   if (!annotation) {
     return (

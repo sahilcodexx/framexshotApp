@@ -42,9 +42,7 @@ export function drawAnnotationOnCanvas(ctx: CanvasRenderingContext2D, annotation
       const lineWidth = annotation.border.width || 5;
       
       let angle: number;
-      let lineEndX: number;
-      let lineEndY: number;
-      
+
       if (annotation.lineType === "curved" && annotation.controlPoints && annotation.controlPoints.length > 0) {
         const cp = annotation.controlPoints[0];
         const dx = annotation.endX - cp.x;
@@ -64,8 +62,8 @@ export function drawAnnotationOnCanvas(ctx: CanvasRenderingContext2D, annotation
       }
       
       const shortenBy = annotation.arrowType !== "none" ? arrowHeadLength * 0.7 : 0;
-      lineEndX = annotation.endX - shortenBy * Math.cos(angle);
-      lineEndY = annotation.endY - shortenBy * Math.sin(angle);
+      const lineEndX = annotation.endX - shortenBy * Math.cos(angle);
+      const lineEndY = annotation.endY - shortenBy * Math.sin(angle);
       
       ctx.beginPath();
       ctx.moveTo(annotation.x, annotation.y);

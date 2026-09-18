@@ -29,6 +29,8 @@ AppDir/
 # Agent / assistant tooling (local-only — not part of the project)
 .agents/
 .claude/
+.kilo/
+.workbuddy-ai/
 agent/
 skills-lock.json
 

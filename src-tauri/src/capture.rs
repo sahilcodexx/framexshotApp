@@ -1,5 +1,8 @@
 //! Cross-desktop capture fallback chains (X11 + Wayland)
 //!
+//! On Windows and macOS this module only dispatches to `xcap_capture`; the
+//! shell-out chain described below is Linux-only.
+//!
 //! Probe tools in priority order, fall through until one succeeds.
 //!
 //! Region:
@@ -23,9 +26,7 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-// ── Environment helpers ────────────────────────────────────────────────────
-
-/// True when running under Wayland.
+#[cfg(target_os = "linux")]
 pub fn is_wayland() -> bool {
     std::env::var("WAYLAND_DISPLAY").is_ok()
         || std::env::var("XDG_SESSION_TYPE")
@@ -57,6 +58,16 @@ pub fn host_command(name: &str) -> Command {
 /// Inside a Flatpak this tests the *host* PATH via `flatpak-spawn --host`.
 pub fn has_binary(name: &str) -> bool {
     if is_flatpak() {
+        // `name` is always a compile-time literal at every call site (grim,
+        // slurp, spectacle, …), so this is not attacker-controlled today. It is
+        // still built as a shell string, so reject anything that is not a plain
+        // binary name rather than relying on that staying true.
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
+            return false;
+        }
         return Command::new("flatpak-spawn")
             .args([
                 "--host",
@@ -91,109 +102,152 @@ pub fn has_binary(name: &str) -> bool {
     })
 }
 
-// ── Public capture entry-points ────────────────────────────────────────────
-
 /// Interactively capture a user-selected region.
+///
+/// `allow(dead_code)`: on Windows and macOS nothing calls this — the region
+/// flow is driven by the region-selector overlay in the frontend, which goes
+/// through `native_capture_interactive` / `native_capture_ocr_region` instead.
+/// The Windows/macOS arm is kept so that the function explains itself if it is
+/// ever reached, rather than silently shelling out to a tool that does not
+/// exist.
+#[allow(dead_code)]
 pub fn capture_region(path: &Path) -> Result<(), String> {
-    if is_wayland() {
-        // COSMIC Desktop
-        if has_binary("cosmic-screenshot") && cosmic_region(path).is_ok() {
-            return Ok(());
+    // Windows and macOS have no grim/slurp/spectacle — the region flow is
+    // handled by the region-selector overlay in the frontend, so
+    // `xcap_capture` only ever reports why it is unreachable here.
+    #[cfg(not(target_os = "linux"))]
+    {
+        return crate::xcap_capture::capture_region(path);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if is_wayland() {
+            if has_binary("cosmic-screenshot") && cosmic_region(path).is_ok() {
+                return Ok(());
+            }
+            if has_binary("spectacle") && spectacle_region(path).is_ok() {
+                return Ok(());
+            }
+            if has_binary("grim") && has_binary("slurp") && grim_slurp_region(path).is_ok() {
+                return Ok(());
+            }
+            if has_binary("grimblast") && grimblast(path, "area").is_ok() {
+                return Ok(());
+            }
+            if has_binary("hyprshot") && hyprshot(path, "region").is_ok() {
+                return Ok(());
+            }
+            #[cfg(target_os = "linux")]
+            if gnome_shell_region(path).is_ok() {
+                return Ok(());
+            }
+            if has_binary("gnome-screenshot") && gnome_screenshot(path, &["-a"]).is_ok() {
+                return Ok(());
+            }
+            return Err("No screenshot tool found for Wayland region capture. \
+             Install grim+slurp (wlroots/Hyprland), spectacle (KDE), \
+             or cosmic-screenshot (COSMIC)."
+                .to_string());
         }
-        // KDE Plasma (Wayland and X11)
+
         if has_binary("spectacle") && spectacle_region(path).is_ok() {
             return Ok(());
         }
-        // wlroots / Hyprland: grim + slurp
-        if has_binary("grim") && has_binary("slurp") && grim_slurp_region(path).is_ok() {
-            return Ok(());
-        }
-        // Hyprland alternative: grimblast (wraps grim+slurp, often installed)
-        if has_binary("grimblast") && grimblast(path, "area").is_ok() {
-            return Ok(());
-        }
-        // Hyprland alternative: hyprshot
-        if has_binary("hyprshot") && hyprshot(path, "region").is_ok() {
-            return Ok(());
-        }
-        // Modern GNOME (42+): interactive area picker over D-Bus
         #[cfg(target_os = "linux")]
         if gnome_shell_region(path).is_ok() {
             return Ok(());
         }
-        // Legacy GNOME
-        if has_binary("gnome-screenshot") && gnome_screenshot(path, &["-a"]).is_ok() {
-            return Ok(());
-        }
-        return Err("No screenshot tool found for Wayland region capture. \
-             Install grim+slurp (wlroots/Hyprland), spectacle (KDE), \
-             or cosmic-screenshot (COSMIC)."
-            .to_string());
-    }
-
-    // X11
-    if has_binary("spectacle") && spectacle_region(path).is_ok() {
-        return Ok(());
-    }
-    #[cfg(target_os = "linux")]
-    if gnome_shell_region(path).is_ok() {
-        return Ok(());
-    }
-    for tool in &[("maim", &["-s"][..]), ("scrot", &["-s"][..])] {
-        if has_binary(tool.0) {
-            let mut cmd = host_command(tool.0);
-            for arg in tool.1 {
-                cmd.arg(arg);
-            }
-            cmd.arg(path);
-            if cmd.status().map(|s| s.success()).unwrap_or(false) && path.exists() {
-                return Ok(());
+        for tool in &[("maim", &["-s"][..]), ("scrot", &["-s"][..])] {
+            if has_binary(tool.0) {
+                let mut cmd = host_command(tool.0);
+                for arg in tool.1 {
+                    cmd.arg(arg);
+                }
+                cmd.arg(path);
+                if cmd.status().map(|s| s.success()).unwrap_or(false) && path.exists() {
+                    return Ok(());
+                }
             }
         }
+        Err(
+            "No screenshot tool found for X11 region capture. Install scrot, maim, or spectacle."
+                .to_string(),
+        )
     }
-    Err(
-        "No screenshot tool found for X11 region capture. Install scrot, maim, or spectacle."
-            .to_string(),
-    )
 }
 
 /// Capture the full screen (all outputs or primary monitor).
 pub fn capture_fullscreen(path: &Path) -> Result<(), String> {
-    if is_wayland() {
-        // COSMIC
-        if has_binary("cosmic-screenshot") && cosmic_fullscreen(path).is_ok() {
-            return Ok(());
+    // On Windows and macOS this is the stitched virtual desktop (all
+    // monitors), matching what bare `grim` does on Linux.
+    #[cfg(not(target_os = "linux"))]
+    {
+        return crate::xcap_capture::capture_fullscreen(path);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if is_wayland() {
+            if has_binary("cosmic-screenshot") && cosmic_fullscreen(path).is_ok() {
+                return Ok(());
+            }
+            if has_binary("spectacle") && spectacle_fullscreen(path).is_ok() {
+                return Ok(());
+            }
+            if has_binary("grim") && grim_fullscreen(path).is_ok() {
+                return Ok(());
+            }
+            if has_binary("grimblast") && grimblast(path, "screen").is_ok() {
+                return Ok(());
+            }
+            if has_binary("hyprshot") && hyprshot(path, "output").is_ok() {
+                return Ok(());
+            }
+            #[cfg(target_os = "linux")]
+            if gnome_shell_fullscreen(path).is_ok() {
+                return Ok(());
+            }
+            // This is the last Wayland resort — grim should already have succeeded.
+            //
+            // SKIP inside a Flatpak: flatpak-spawn --host always reaches the user's
+            // grim/slurp (verified end-to-end). The portal is unreliable on some
+            // backends (xdg-desktop-portal-hyprland returns NotAllowed for
+            // non-interactive calls) and adds nothing the host tools don't already
+            // give us. Outside a Flatpak the portal remains a useful fallback for
+            // systems that don't have grim/slurp installed.
+            #[cfg(target_os = "linux")]
+            if !is_flatpak() {
+                if portal_fullscreen(path).is_ok() {
+                    return Ok(());
+                }
+            }
+            if has_binary("gnome-screenshot") && gnome_screenshot(path, &[]).is_ok() {
+                return Ok(());
+            }
+            return Err("No screenshot tool found for Wayland fullscreen capture. \
+             Install grim (wlroots/Hyprland), spectacle (KDE), or \
+             cosmic-screenshot (COSMIC)."
+                .to_string());
         }
-        // KDE
+
         if has_binary("spectacle") && spectacle_fullscreen(path).is_ok() {
             return Ok(());
         }
-        // wlroots / Hyprland: bare grim (captures all outputs)
-        if has_binary("grim") && grim_fullscreen(path).is_ok() {
-            return Ok(());
-        }
-        // Hyprland: grimblast
-        if has_binary("grimblast") && grimblast(path, "screen").is_ok() {
-            return Ok(());
-        }
-        // Hyprland: hyprshot
-        if has_binary("hyprshot") && hyprshot(path, "output").is_ok() {
-            return Ok(());
-        }
-        // Modern GNOME (42+)
         #[cfg(target_os = "linux")]
         if gnome_shell_fullscreen(path).is_ok() {
             return Ok(());
         }
-        // Universal: xdg-desktop-portal (works on every desktop, incl. Flatpak)
-        // This is the last Wayland resort — grim should already have succeeded.
-        //
-        // SKIP inside a Flatpak: flatpak-spawn --host always reaches the user's
-        // grim/slurp (verified end-to-end). The portal is unreliable on some
-        // backends (xdg-desktop-portal-hyprland returns NotAllowed for
-        // non-interactive calls) and adds nothing the host tools don't already
-        // give us. Outside a Flatpak the portal remains a useful fallback for
-        // systems that don't have grim/slurp installed.
+        if has_binary("scrot") {
+            let status = host_command("scrot")
+                .arg(path)
+                .status()
+                .map_err(|e| format!("scrot failed: {}", e))?;
+            if status.success() && path.exists() {
+                return Ok(());
+            }
+        }
+        // Skip the portal inside a flatpak — see comment in capture_fullscreen().
         #[cfg(target_os = "linux")]
         if !is_flatpak() {
             if portal_fullscreen(path).is_ok() {
@@ -203,106 +257,75 @@ pub fn capture_fullscreen(path: &Path) -> Result<(), String> {
         if has_binary("gnome-screenshot") && gnome_screenshot(path, &[]).is_ok() {
             return Ok(());
         }
-        return Err("No screenshot tool found for Wayland fullscreen capture. \
-             Install grim (wlroots/Hyprland), spectacle (KDE), or \
-             cosmic-screenshot (COSMIC)."
-            .to_string());
+        Err(
+            "No screenshot tool found for X11 fullscreen capture. Install scrot or spectacle."
+                .to_string(),
+        )
     }
-
-    // X11
-    if has_binary("spectacle") && spectacle_fullscreen(path).is_ok() {
-        return Ok(());
-    }
-    #[cfg(target_os = "linux")]
-    if gnome_shell_fullscreen(path).is_ok() {
-        return Ok(());
-    }
-    if has_binary("scrot") {
-        let status = host_command("scrot")
-            .arg(path)
-            .status()
-            .map_err(|e| format!("scrot failed: {}", e))?;
-        if status.success() && path.exists() {
-            return Ok(());
-        }
-    }
-    // Skip the portal inside a flatpak — see comment in capture_fullscreen().
-    #[cfg(target_os = "linux")]
-    if !is_flatpak() {
-        if portal_fullscreen(path).is_ok() {
-            return Ok(());
-        }
-    }
-    if has_binary("gnome-screenshot") && gnome_screenshot(path, &[]).is_ok() {
-        return Ok(());
-    }
-    Err(
-        "No screenshot tool found for X11 fullscreen capture. Install scrot or spectacle."
-            .to_string(),
-    )
 }
 
 /// Capture the focused/active window.
 pub fn capture_window(path: &Path) -> Result<(), String> {
-    if is_wayland() {
-        // COSMIC has no dedicated window mode — use region picker
-        if has_binary("cosmic-screenshot") {
-            return capture_region(path);
+    #[cfg(not(target_os = "linux"))]
+    {
+        return crate::xcap_capture::capture_window(path);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if is_wayland() {
+            // COSMIC has no dedicated window mode — use region picker
+            if has_binary("cosmic-screenshot") {
+                return capture_region(path);
+            }
+            if has_binary("spectacle") && spectacle_window(path).is_ok() {
+                return Ok(());
+            }
+            if has_binary("grimblast") && grimblast(path, "active").is_ok() {
+                return Ok(());
+            }
+            if has_binary("hyprshot") && hyprshot(path, "window").is_ok() {
+                return Ok(());
+            }
+            // hyprctl is always installed when Hyprland is running.
+            if has_binary("hyprctl") && has_binary("grim") && hyprctl_grim_window(path).is_ok() {
+                return Ok(());
+            }
+            #[cfg(target_os = "linux")]
+            if gnome_shell_window(path).is_ok() {
+                return Ok(());
+            }
+            if has_binary("gnome-screenshot") && gnome_screenshot(path, &["-w"]).is_ok() {
+                return Ok(());
+            }
+            return Err("No window capture tool found for Wayland. \
+             Install grimblast or hyprshot (Hyprland), spectacle (KDE), \
+             or cosmic-screenshot (COSMIC)."
+                .to_string());
         }
-        // KDE
+
         if has_binary("spectacle") && spectacle_window(path).is_ok() {
             return Ok(());
         }
-        // Hyprland: grimblast active (focused window)
-        if has_binary("grimblast") && grimblast(path, "active").is_ok() {
-            return Ok(());
-        }
-        // Hyprland: hyprshot -m window
-        if has_binary("hyprshot") && hyprshot(path, "window").is_ok() {
-            return Ok(());
-        }
-        // Hyprland (always available): hyprctl activewindow + grim -g
-        // hyprctl is always installed when Hyprland is running.
-        if has_binary("hyprctl") && has_binary("grim") && hyprctl_grim_window(path).is_ok() {
-            return Ok(());
-        }
-        // Modern GNOME (42+)
         #[cfg(target_os = "linux")]
         if gnome_shell_window(path).is_ok() {
             return Ok(());
         }
-        if has_binary("gnome-screenshot") && gnome_screenshot(path, &["-w"]).is_ok() {
-            return Ok(());
+        if has_binary("scrot") {
+            let status = host_command("scrot")
+                .arg("-u") // focused window
+                .arg(path)
+                .status()
+                .map_err(|e| format!("scrot failed: {}", e))?;
+            if status.success() && path.exists() {
+                return Ok(());
+            }
         }
-        return Err("No window capture tool found for Wayland. \
-             Install grimblast or hyprshot (Hyprland), spectacle (KDE), \
-             or cosmic-screenshot (COSMIC)."
-            .to_string());
+        Err("No window capture tool found for X11. Install scrot or spectacle.".to_string())
     }
-
-    // X11
-    if has_binary("spectacle") && spectacle_window(path).is_ok() {
-        return Ok(());
-    }
-    #[cfg(target_os = "linux")]
-    if gnome_shell_window(path).is_ok() {
-        return Ok(());
-    }
-    if has_binary("scrot") {
-        let status = host_command("scrot")
-            .arg("-u") // focused window
-            .arg(path)
-            .status()
-            .map_err(|e| format!("scrot failed: {}", e))?;
-        if status.success() && path.exists() {
-            return Ok(());
-        }
-    }
-    Err("No window capture tool found for X11. Install scrot or spectacle.".to_string())
 }
 
-// ── Per-tool helpers ───────────────────────────────────────────────────────
-
+#[cfg(target_os = "linux")]
 fn cosmic_region(path: &Path) -> Result<(), String> {
     let save_dir = path
         .parent()
@@ -332,6 +355,7 @@ fn cosmic_region(path: &Path) -> Result<(), String> {
     find_newest_png(&save_dir, path)
 }
 
+#[cfg(target_os = "linux")]
 fn cosmic_fullscreen(path: &Path) -> Result<(), String> {
     let save_dir = path
         .parent()
@@ -356,6 +380,7 @@ fn cosmic_fullscreen(path: &Path) -> Result<(), String> {
     find_newest_png(&save_dir, path)
 }
 
+#[cfg(target_os = "linux")]
 fn spectacle_region(path: &Path) -> Result<(), String> {
     let s = host_command("spectacle")
         .args(["--region", "-b", "-n", "-o"])
@@ -369,6 +394,7 @@ fn spectacle_region(path: &Path) -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn spectacle_fullscreen(path: &Path) -> Result<(), String> {
     let s = host_command("spectacle")
         .args(["--fullscreen", "-b", "-n", "-o"])
@@ -382,6 +408,7 @@ fn spectacle_fullscreen(path: &Path) -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn spectacle_window(path: &Path) -> Result<(), String> {
     let s = host_command("spectacle")
         .args(["--window", "-b", "-n", "-o"])
@@ -395,6 +422,7 @@ fn spectacle_window(path: &Path) -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn grim_slurp_region(path: &Path) -> Result<(), String> {
     let slurp = host_command("slurp")
         .stdout(Stdio::piped())
@@ -422,6 +450,7 @@ fn grim_slurp_region(path: &Path) -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn grim_fullscreen(path: &Path) -> Result<(), String> {
     // `grim <path>` without -o captures a composite of all outputs.
     // This is the standard invocation on Hyprland / wlroots for fullscreen.
@@ -438,6 +467,7 @@ fn grim_fullscreen(path: &Path) -> Result<(), String> {
 
 /// grimblast: Hyprland-contrib wrapper around grim.
 /// mode: "area" (region+slurp), "screen" (all outputs), "active" (focused window)
+#[cfg(target_os = "linux")]
 fn grimblast(path: &Path, mode: &str) -> Result<(), String> {
     let s = host_command("grimblast")
         .arg("save")
@@ -454,6 +484,7 @@ fn grimblast(path: &Path, mode: &str) -> Result<(), String> {
 
 /// hyprshot: common Hyprland screenshot tool.
 /// mode: "region", "output", "window"
+#[cfg(target_os = "linux")]
 fn hyprshot(path: &Path, mode: &str) -> Result<(), String> {
     let dir = path.parent().unwrap_or_else(|| Path::new("/tmp"));
     let filename = path
@@ -482,6 +513,7 @@ fn hyprshot(path: &Path, mode: &str) -> Result<(), String> {
 /// Hyprland window capture via `hyprctl activewindow -j` + `grim -g`.
 /// hyprctl is always present on a running Hyprland system.
 /// The output JSON contains `at: [x, y]` and `size: [w, h]`.
+#[cfg(target_os = "linux")]
 fn hyprctl_grim_window(path: &Path) -> Result<(), String> {
     let output = host_command("hyprctl")
         .args(["activewindow", "-j"])
@@ -529,6 +561,7 @@ fn hyprctl_grim_window(path: &Path) -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn gnome_screenshot(path: &Path, extra_args: &[&str]) -> Result<(), String> {
     let mut cmd = host_command("gnome-screenshot");
     for arg in extra_args {
@@ -842,31 +875,11 @@ fn gnome_shell_window(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-// ── Non-Linux stubs ────────────────────────────────────────────────────────
-#[cfg(not(target_os = "linux"))]
-fn portal_fullscreen(_path: &Path) -> Result<(), String> {
-    Err("portal capture is Linux-only".to_string())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn gnome_shell_region(_path: &Path) -> Result<(), String> {
-    Err("GNOME Shell capture is Linux-only".to_string())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn gnome_shell_fullscreen(_path: &Path) -> Result<(), String> {
-    Err("GNOME Shell capture is Linux-only".to_string())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn gnome_shell_window(_path: &Path) -> Result<(), String> {
-    Err("GNOME Shell capture is Linux-only".to_string())
-}
-
 // ── Utilities ──────────────────────────────────────────────────────────────
 
 /// Copy the most recently modified PNG in `dir` to `dest`.
 /// Used as a fallback when a tool doesn't print its output path.
+#[cfg(target_os = "linux")]
 fn find_newest_png(dir: &str, dest: &Path) -> Result<(), String> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         let mut files: Vec<_> = entries

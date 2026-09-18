@@ -1,0 +1,24 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "overlay",
+  "description": "Minimal capability set for the two auxiliary windows. Both are transient, non-interactive surfaces that only need to read a capture, hide themselves and report back to the main window — so they are deliberately not granted window creation/closing, URL opening, global shortcuts or autostart, all of which the previous shared capability handed them.",
+  "windows": ["region-selector", "quick-overlay"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:event:allow-emit",
+    "core:event:allow-emit-to",
+
+    "core:window:allow-hide",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-set-resizable",
+
+    "core:app:default",
+    "core:path:default",
+    "core:resources:default",
+
+    "store:allow-get-store",
+    "store:allow-load",
+    "store:allow-get"
+  ]
+}

@@ -126,9 +126,38 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
 
   const actions = editorActions;
   
-  const [screenshotImage, setScreenshotImage] = useState<HTMLImageElement | null>(null);
-  const [imageLoaded, setImageLoaded] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // These three used to be independent state, reset together from the top of the
+  // load effect whenever `imagePath` changed. Tagging them with the path they
+  // belong to gets the same reset by derivation — a new path is automatically
+  // not-yet-loaded and error-free — which removes the synchronous setState from
+  // the effect and, more importantly, the window in which a new capture could
+  // render using the *previous* capture's image.
+  const [loadedImage, setLoadedImage] = useState<{
+    path: string;
+    image: HTMLImageElement;
+  } | null>(null);
+  const [reportedError, setReportedError] = useState<{
+    path: string;
+    message: string;
+  } | null>(null);
+
+  const screenshotImage =
+    loadedImage && loadedImage.path === imagePath ? loadedImage.image : null;
+  // `imageLoaded` was always set in lockstep with `screenshotImage`, so it is
+  // simply that, derived.
+  const imageLoaded = screenshotImage !== null;
+  const loadError = !imagePath
+    ? "No image path provided"
+    : reportedError && reportedError.path === imagePath
+      ? reportedError.message
+      : null;
+
+  const reportError = useCallback(
+    (message: string) => {
+      if (imagePath) setReportedError({ path: imagePath, message });
+    },
+    [imagePath]
+  );
   
   const [isSaving, setIsSaving] = useState(false);
   const [isCopying, setIsCopying] = useState(false);
@@ -180,12 +209,9 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
   }, []);
 
   useEffect(() => {
-    setLoadError(null);
-    setImageLoaded(false);
-    setScreenshotImage(null);
-
+    // No reset block here: `screenshotImage`, `imageLoaded` and `loadError` are
+    // all derived from `imagePath` above, so changing it resets them already.
     if (!imagePath) {
-      setLoadError("No image path provided");
       return;
     }
 
@@ -211,8 +237,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
 
       img.onload = async () => {
         if (!isMounted) return;
-        setScreenshotImage(img);
-        setImageLoaded(true);
+        setLoadedImage({ path: imagePath, image: img });
 
         // Respect user-saved default padding — don't auto-change after "Set as Default"
         try {
@@ -235,7 +260,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
 
       img.onerror = () => {
         if (!isMounted) return;
-        setLoadError(`Failed to load image from: ${imagePath}`);
+        reportError(`Failed to load image from: ${imagePath}`);
       };
 
       img.src = finalSrc;
@@ -246,7 +271,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
     return () => {
       isMounted = false;
     };
-  }, [imagePath, actions]);
+  }, [imagePath, actions, reportError]);
 
   const handleSave = useCallback(async () => {
     if (!screenshotImage || isSaving || isCopying) return;
@@ -269,7 +294,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
               setIsSaving(false);
             };
             reader.onerror = () => {
-              setLoadError("Failed to read image data");
+              reportError("Failed to read image data");
               setIsSaving(false);
             };
             reader.readAsDataURL(blob);
@@ -281,10 +306,10 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
         1.0
       );
     } catch (err) {
-      setLoadError(`Failed to save: ${err instanceof Error ? err.message : String(err)}`);
+      reportError(`Failed to save: ${err instanceof Error ? err.message : String(err)}`);
       setIsSaving(false);
     }
-  }, [screenshotImage, annotations, renderHighQualityCanvas, onSave, isSaving, isCopying, imagePath]);
+  }, [screenshotImage, annotations, renderHighQualityCanvas, onSave, isSaving, isCopying, imagePath, reportError]);
 
   const handleCopy = useCallback(async () => {
     if (!screenshotImage || isSaving || isCopying) return;
@@ -311,7 +336,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
       });
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      setLoadError(`Failed to copy: ${errorMessage}`);
+      reportError(`Failed to copy: ${errorMessage}`);
       toast.error("Failed to copy", {
         description: errorMessage,
         duration: 3000,
@@ -319,7 +344,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
     } finally {
       setIsCopying(false);
     }
-  }, [screenshotImage, annotations, renderHighQualityCanvas, isSaving, isCopying, tempDir, imagePath]);
+  }, [screenshotImage, annotations, renderHighQualityCanvas, isSaving, isCopying, tempDir, imagePath, reportError]);
 
   const handleAnnotationAdd = useCallback((annotation: Annotation) => {
     actions.addAnnotation(annotation);

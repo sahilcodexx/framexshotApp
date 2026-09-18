@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for FrameXShot windows",
-  "windows": ["main", "quick-overlay", "region-selector"],
+  "description": "Full capability set for the main FrameXShot window. The region-selector and quick-overlay windows deliberately do NOT get this — see overlay.json.",
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:default",
@@ -25,6 +25,7 @@
     "core:window:allow-maximize",
     "core:window:allow-unmaximize",
     "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
     "core:window:allow-set-title",
     "core:window:allow-set-skip-taskbar",
     "core:window:allow-set-cursor-grab",

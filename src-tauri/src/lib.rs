@@ -1,19 +1,43 @@
-//! FrameXShot — Linux backend
+//! FrameXShot — desktop backend
+
+// The backend dispatches per-platform with paired `#[cfg]` blocks:
+//
+//     #[cfg(not(target_os = "linux"))]
+//     { ...; return Ok(value); }
+//
+//     #[cfg(target_os = "linux")]
+//     { ... }
+//
+// Exactly one block survives compilation, so clippy sees the `return` in the
+// surviving block as the function's tail and flags it as needless. Deleting it
+// would make each arm's correctness depend on whether it happens to be the last
+// block after cfg-stripping — which differs per target and is not visible when
+// reading the file. The explicit `return` keeps every arm self-contained and
+// symmetric, and it is the reason this codebase compiles the same way on three
+// platforms that cannot all be checked here.
+#![allow(clippy::needless_return)]
 
 mod capture;
 mod clipboard;
 mod commands;
 mod image;
+#[cfg(target_os = "macos")]
+mod mac_api;
 mod ocr;
+#[cfg(not(target_os = "linux"))]
+mod overlay;
 mod screenshot;
 mod utils;
+#[cfg(not(target_os = "linux"))]
+mod xcap_capture;
 
 use commands::{
     capture_all_monitors, capture_once, capture_region, capture_screen_for_selector,
-    cleanup_old_screenshots, copy_image_file_to_clipboard, crop_and_save_region,
-    get_desktop_directory, get_mouse_position, get_temp_directory, move_window_to_active_space,
-    native_capture_fullscreen, native_capture_interactive, native_capture_ocr_region,
-    native_capture_window, perform_ocr_on_file, play_screenshot_sound, read_file_as_base64,
+    check_ocr_available, check_screen_capture_permission, cleanup_old_screenshots,
+    copy_image_file_to_clipboard, crop_and_save_region, get_desktop_directory, get_mouse_position,
+    get_temp_directory, move_window_to_active_space, native_capture_fullscreen,
+    native_capture_interactive, native_capture_ocr_region, native_capture_window,
+    open_screen_capture_settings, perform_ocr_on_file, play_screenshot_sound, read_file_as_base64,
     render_image_with_effects_rust, save_edited_image, select_folder_dialog, show_quick_overlay,
 };
 
@@ -93,7 +117,7 @@ pub fn run() {
         }
     }
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             let _ = show_main_window(app);
@@ -103,7 +127,15 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--hidden"]),
-        ))
+        ));
+
+    // Native folder picker for `select_folder_dialog`. Serves Windows and
+    // macOS; Linux keeps using the zenity/kdialog/python3 chain, so the plugin
+    // is not compiled there.
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_dialog::init());
+
+    builder
         .setup(|app| {
             // Enable autostart by default
             {
@@ -181,18 +213,34 @@ pub fn run() {
                 }
             });
 
-            // Region selector — fullscreen transparent overlay
+            // Region selector — borderless transparent overlay, moved and sized
+            // to cover exactly one monitor at capture time by
+            // `overlay::place_and_show_selector`.
+            //
+            // Deliberately NOT `.fullscreen(true)`: on macOS that is *native*
+            // fullscreen, which exiles the window to its own Space behind a ~1s
+            // animation and renders a transparent window against a black
+            // backdrop. It also always covers whichever monitor the window
+            // already sat on, which is not necessarily the monitor that was
+            // captured. See the `overlay` module docs.
+            //
+            // `.shadow(false)` matters on Windows: tao applies a hidden-offset
+            // size correction to undecorated windows *that have shadows*, which
+            // would leave the overlay a few pixels off the monitor bounds and
+            // skew every selection coordinate. A drop shadow on a fullscreen
+            // transparent overlay is meaningless anyway.
             let selector = WebviewWindowBuilder::new(
                 app,
                 "region-selector",
                 WebviewUrl::App("index.html?selector=1".into()),
             )
             .title("Select Region")
-            .fullscreen(true)
             .decorations(false)
             .transparent(true)
+            .shadow(false)
             .always_on_top(true)
             .skip_taskbar(true)
+            .resizable(false)
             .visible(false)
             .build()?;
 
@@ -313,7 +361,10 @@ pub fn run() {
             capture_screen_for_selector,
             crop_and_save_region,
             perform_ocr_on_file,
-            cleanup_old_screenshots
+            cleanup_old_screenshots,
+            check_ocr_available,
+            check_screen_capture_permission,
+            open_screen_capture_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

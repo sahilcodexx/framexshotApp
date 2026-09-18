@@ -32,11 +32,18 @@ export function QuickOverlay() {
     path: null,
     createdAt: null,
   });
+  const [dataUrl, setDataUrl] = useState<string | null>(null);
   const [imageLoaded, setImageLoaded] = useState(false);
   const [imageError, setImageError] = useState(false);
   const [isCopying, setIsCopying] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [isFadingOut, setIsFadingOut] = useState(false);
+  // Which capture the fade-out applies to, rather than a bare boolean.
+  // A boolean had to be reset to false from inside the effect whenever
+  // `state.path` changed; comparing against the current path makes a new
+  // capture cancel the previous fade by derivation, with no setState in an
+  // effect and no window where a fresh capture renders already faded.
+  const [fadingPath, setFadingPath] = useState<string | null>(null);
+  const isFadingOut = fadingPath !== null && fadingPath === state.path;
 
   useEffect(() => {
     const loadInitialState = async () => {
@@ -108,17 +115,15 @@ export function QuickOverlay() {
 
   useEffect(() => {
     if (!state.path) {
-      setIsFadingOut(false);
       return;
     }
 
-    setIsFadingOut(false);
-
+    const capturePath = state.path;
     const fadeDelayMs = 5000;
     const fadeDurationMs = 180;
 
     const fadeTimer = window.setTimeout(() => {
-      setIsFadingOut(true);
+      setFadingPath(capturePath);
     }, fadeDelayMs);
 
     const hideTimer = window.setTimeout(() => {
@@ -136,21 +141,24 @@ export function QuickOverlay() {
     };
   }, [state.path]);
 
-  const [dataUrl, setDataUrl] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
     if (!state.path) {
-      setDataUrl(null);
-      setImageLoaded(false);
-      setImageError(false);
+      // No reset needed here. `state.path` is only null on the very first
+      // render, when dataUrl/imageLoaded/imageError are already at exactly these
+      // defaults — so the three setState calls that used to live here were
+      // no-ops React bailed out of. Every *subsequent* capture is reset by the
+      // "overlay-show-capture" listener above, which clears all three before it
+      // sets the new path.
       return;
     }
 
     if (state.path.startsWith("data:")) {
-      setDataUrl(state.path);
-      setImageLoaded(true);
-      setImageError(false);
+      // An inline data: URI needs no loading, so there is nothing to store —
+      // `imageSrc` below already falls back to `state.path` for this case. The
+      // three setState calls that were here only mirrored values the render
+      // could derive, and did it synchronously inside an effect.
       return;
     }
 
@@ -230,7 +238,7 @@ export function QuickOverlay() {
                 />
               </Reveal>
             )}
-            {!imageLoaded && !dataUrl && !imageError && (
+            {!imageLoaded && !imageSrc && !imageError && (
               <div className="absolute inset-0 flex items-center justify-center bg-muted/20">
                 <div className="size-8 animate-spin rounded-full border-2 border-primary/20 border-t-primary" />
               </div>

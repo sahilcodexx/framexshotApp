@@ -3,6 +3,7 @@ import { Switch } from "@/components/ui/switch";
 import { isAssetId, isDataUrl, migrateStoredValue } from "@/lib/asset-registry";
 import { processScreenshotWithDefaultBackground } from "@/lib/auto-process";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
+import { isMac, isWindows } from "@/lib/platform";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -49,8 +50,6 @@ const DEFAULT_SHORTCUTS: KeyboardShortcut[] = [
   { id: "ocr", action: "OCR Region", shortcut: "CommandOrControl+Shift+O", enabled: false },
 ];
 
-const isMac = typeof navigator !== "undefined" && /Mac|iPod|iPhone|iPad/.test(navigator.userAgent);
-
 function formatShortcut(shortcut: string): string {
   if (isMac) {
     return shortcut
@@ -77,7 +76,10 @@ async function restoreWindowOnScreen(mouseX?: number, mouseY?: number) {
     try {
       const monitors = await availableMonitors();
       
-      const targetMonitor = monitors.find((monitor: any) => {
+      // `availableMonitors()` already returns Monitor[], so the parameter type
+      // is inferred — annotating it `any` only discarded that and silenced
+      // typos in `.position` / `.size` / `.scaleFactor` below.
+      const targetMonitor = monitors.find((monitor) => {
         const pos = monitor.position;
         const size = monitor.size;
         return (
@@ -151,11 +153,20 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
   const [tempScreenshotPath, setTempScreenshotPath] = useState<string | null>(null);
-  const [showOnboarding, setShowOnboarding] = useState(false);
+  // Decided during the first render, not from an effect. `hasCompletedOnboarding`
+  // is a synchronous localStorage read, so there is nothing to wait for — and the
+  // effect version rendered the main UI for one frame before replacing it with
+  // the onboarding flow, which read as a flash of the wrong screen on first launch.
+  const [showOnboarding, setShowOnboarding] = useState(() => !hasCompletedOnboarding());
   const [shortcuts, setShortcuts] = useState<KeyboardShortcut[]>(DEFAULT_SHORTCUTS);
   const [enableGlobalHotkeys, setEnableGlobalHotkeys] = useState<boolean>(true);
   const [settingsVersion, setSettingsVersion] = useState(0);
-  const [tempDir, setTempDir] = useState<string>("/tmp");
+  // Empty until `get_temp_directory` resolves. It must NOT default to "/tmp":
+  // that path does not exist on Windows, and a capture fired before init
+  // completes (CLI flag / global shortcut) would pass it straight through as the
+  // save directory and fail. Every read site is `tempDir || saveDir`, so an empty
+  // string correctly falls back to the user's save directory instead.
+  const [tempDir, setTempDir] = useState<string>("");
 
   // Refs to hold current values for use in callbacks that may have stale closures
   const settingsRef = useRef({ autoApplyBackground, saveDir, copyToClipboard, tempDir });
@@ -228,14 +239,25 @@ function App() {
         setError(`Failed to get Desktop directory: ${err instanceof Error ? err.message : String(err)}`);
       }
 
-      // Get the system temp directory (canonicalized to resolve symlinks)
       try {
         const systemTempDir = await invoke<string>("get_temp_directory");
         setTempDir(systemTempDir);
       } catch (err) {
         console.error("Failed to get temp directory, using fallback:", err);
-        // Keep the default /tmp fallback
       }
+
+      // Sweep captures left behind by previous sessions. Fire-and-forget so the
+      // first paint is never gated on disk I/O.
+      //
+      // This is only safe to run automatically now that cleanup is scoped to the
+      // app's own temp subdirectory and skips anything under an hour old — it
+      // used to scan the shared system temp directory, where it could delete
+      // other programs' files, which is why nothing ever called it.
+      void invoke<number>("cleanup_old_screenshots")
+        .then((removed) => {
+          if (removed > 0) console.info(`Removed ${removed} stale temp capture(s)`);
+        })
+        .catch((err) => console.warn("Temp cleanup failed:", err));
 
       // Load settings from store. The previous version awaited five store.get()
       // calls serially and also awaited the first-run saveDir write — that
@@ -309,15 +331,6 @@ function App() {
     };
 
     initializeApp();
-
-    const shouldShowOnboarding = !hasCompletedOnboarding();
-    if (shouldShowOnboarding) {
-      setShowOnboarding(true);
-    }
-
-    // DEV ONLY: Uncomment to test editor with any image file
-    // setTempScreenshotPath("/Users/montimage/Desktop/framexshot_1768263844426.png");
-    // setMode("editing");
   }, []);
 
 
@@ -334,8 +347,50 @@ function App() {
     setError(null);
     activeCaptureModeRef.current = captureMode;
 
+    // ─── Preflight: check optional/OS-gated prerequisites BEFORE hiding ──────
+    // Both of these fail in ways that look like an app bug if they are not
+    // caught here. macOS without Screen Recording permission does not error at
+    // all — it returns the desktop wallpaper with every window missing. A
+    // missing Tesseract surfaces as a raw "program not found" from a shell-out.
+    // Checking up front also means the error is visible: once the main window
+    // is hidden below, there is nowhere to render it.
+    try {
+      const capturePermission = await invoke<{ available: boolean; hint: string }>(
+        "check_screen_capture_permission"
+      );
+      if (!capturePermission.available) {
+        setError(capturePermission.hint);
+        toast.error("Screen Recording permission required", {
+          description: capturePermission.hint,
+          duration: 12000,
+          action: {
+            label: "Open Settings",
+            onClick: () => {
+              void invoke("open_screen_capture_settings").catch(console.error);
+            },
+          },
+        });
+        setIsCapturing(false);
+        return;
+      }
+
+      if (captureMode === "ocr") {
+        const ocr = await invoke<{ available: boolean; hint: string }>("check_ocr_available");
+        if (!ocr.available) {
+          setError(ocr.hint);
+          toast.error("OCR engine not installed", { description: ocr.hint, duration: 12000 });
+          setIsCapturing(false);
+          return;
+        }
+      }
+    } catch (err) {
+      // A failure of the *check itself* must not block capture — these commands
+      // are advisory. Log and continue; the capture path still reports real errors.
+      console.warn("Capture preflight check failed, continuing anyway:", err);
+    }
+
     const appWindow = getCurrentWindow();
-    
+
     // Read current settings from ref to avoid stale closure issues
     const { autoApplyBackground: shouldAutoApply, saveDir: currentSaveDir, copyToClipboard: shouldCopyToClipboard, tempDir: currentTempDir } = settingsRef.current;
 
@@ -374,7 +429,11 @@ function App() {
             errorMessage.toLowerCase().includes("denied")
           ) {
             setError(
-              "Screen Recording permission required. Please go to System Settings > Privacy & Security > Screen Recording and enable access for FrameXShot, then restart the app."
+              isMac
+                ? "Screen Recording permission required. Please go to System Settings > Privacy & Security > Screen Recording and enable access for FrameXShot, then restart the app."
+                : isWindows
+                ? "Screen capture failed. Please make sure no other app is blocking screen capture (screen recorders, DRM-protected windows or overlays), then try again."
+                : "Screen capture failed. Please check that screen capture is permitted for your session, then try again."
             );
             await restoreWindow();
           } else if (
@@ -456,18 +515,19 @@ function App() {
           return;
         }
 
-        // result === "ok" means Windows/macOS: region-selector window is now open.
-        // The "region-selected" event listener will handle crop + editor from here.
-        // Make sure the selector window is fullscreen and focused.
-        try {
-          const { getAllWebviewWindows } = await import("@tauri-apps/api/webviewWindow");
-          const allWindows = await getAllWebviewWindows();
-          const selector = allWindows.find((win) => win.label === "region-selector");
-          if (selector) {
-            await selector.setFullscreen(true);
-            await selector.setFocus();
-          }
-        } catch {}
+        // result === "ok" means Windows/macOS: the backend has already moved the
+        // region-selector over the monitor under the cursor, shown it and focused
+        // it (`overlay::place_and_show_selector`). The "region-selected" event
+        // listener handles crop + editor from here.
+        //
+        // Nothing to do on this side. There used to be a re-assert here calling
+        // setFullscreen(true) + setFocus(); it is gone deliberately. Placement is
+        // the backend's job now — it knows which monitor was captured, and it
+        // returns Err (so this invoke throws) when it cannot place the window.
+        // Re-asserting from here could only show an *unplaced* overlay, and
+        // setFullscreen in particular was actively wrong: on macOS it forces the
+        // window into a native fullscreen Space.
+        //
         // Don't setIsCapturing(false) here — the region-selected listener will do it
         return;
       }
@@ -479,7 +539,10 @@ function App() {
       };
 
       const screenshotPath = await invoke<string>(commandMap[captureMode], {
-        saveDir: currentTempDir,
+        // `|| currentSaveDir` matches the region/OCR call sites above. `tempDir`
+        // is empty until `get_temp_directory` resolves, and an empty save dir
+        // would make the backend write relative to the process CWD.
+        saveDir: currentTempDir || currentSaveDir,
       });
 
       // Get mouse position IMMEDIATELY after screenshot completes
@@ -544,7 +607,11 @@ function App() {
         errorMessage.toLowerCase().includes("denied")
       ) {
         setError(
-          "Screen Recording permission required. Please go to System Settings > Privacy & Security > Screen Recording and enable access for FrameXShot, then restart the app."
+          isMac
+            ? "Screen Recording permission required. Please go to System Settings > Privacy & Security > Screen Recording and enable access for FrameXShot, then restart the app."
+            : isWindows
+            ? "Screen capture failed. Please make sure no other app is blocking screen capture (screen recorders, DRM-protected windows or overlays), then try again."
+            : "Screen capture failed. Please check that screen capture is permitted for your session, then try again."
         );
         // Always show window for permission errors so user can see the message
         await restoreWindow();
@@ -646,11 +713,29 @@ function App() {
 
     return () => {
       active = false;
-      const shortcutsToUnregister = Array.from(registeredShortcutsRef.current);
+      // Read the ref at cleanup time, not when the effect runs. `setupHotkeys`
+      // populates this set *asynchronously*, after the effect body has already
+      // returned, so capturing it up front — which is what this rule normally
+      // wants — would snapshot an empty set and leak every registration:
+      // shortcuts would stack up on each settings change until the OS refused to
+      // bind any more.
+      //
+      // The ref holds one Set for the lifetime of the component and is only ever
+      // mutated, never reassigned, so binding it to a local here is equivalent to
+      // touching `.current` twice — and keeps the mutation off the ref.
+      //
+      // The rule still fires because it cannot tell this ref from one holding a
+      // React-rendered DOM node, which is the case its advice is written for.
+      // This suppression is narrow and deliberate: the surrounding comment is the
+      // justification, and "copy it inside the effect" — the fix it suggests — is
+      // the specific thing that would break this.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      const registered = registeredShortcutsRef.current;
+      const shortcutsToUnregister = Array.from(registered);
       if (shortcutsToUnregister.length > 0) {
         unregister(shortcutsToUnregister).catch(console.error);
       }
-      registeredShortcutsRef.current.clear();
+      registered.clear();
     };
   }, [shortcuts, enableGlobalHotkeys, settingsVersion]);
 

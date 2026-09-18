@@ -46,7 +46,7 @@ export async function loadImage(src: string): Promise<HTMLImageElement> {
       const { invoke } = await import("@tauri-apps/api/core");
       let filePath = src;
       if (src.startsWith("asset:")) {
-        filePath = decodeURIComponent(src.replace(/^asset:\/\/[^\/]+\//, "/"));
+        filePath = decodeURIComponent(src.replace(/^asset:\/\/[^/]+\//, "/"));
       }
       finalSrc = await invoke<string>("read_file_as_base64", { path: filePath });
     } catch (e) {
@@ -757,14 +757,26 @@ export function usePreviewGenerator({
   // every DRAG_THROTTLE_MS, so the per-pixel settings updates don't
   // accumulate or starve the render. The full regen with effects runs
   // after the drag ends.
+  // Keep `pendingSettingsRef` pointed at the latest settings on every render.
+  //
+  // This assignment used to live at the top of the big debounce effect below,
+  // which made `settings` — a fresh object each render — a dependency of that
+  // effect. Satisfying the linter by adding it there would have re-run the whole
+  // debounce/throttle setup on every single render, defeating the fine-grained
+  // `settings.*` dependency list that exists precisely to avoid regenerating the
+  // preview when an unrelated field changes. Splitting the ref sync into its own
+  // always-running effect keeps the ref current for the timers below without
+  // coupling them to object identity.
+  useEffect(() => {
+    pendingSettingsRef.current = settings;
+  });
+
   useEffect(() => {
     if (!screenshotImage || !canvasRef.current) return;
 
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current);
     }
-
-    pendingSettingsRef.current = settings;
 
     // Reset effects flag on every settings change (during drag)
     renderEffectsRef.current = false;

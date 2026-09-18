@@ -220,7 +220,7 @@ export function PreferencesPage({ onBack, onSettingsChange }: PreferencesPagePro
                       type="text"
                       value={settings.saveDir}
                       onChange={(e) => updateSetting("saveDir", e.target.value)}
-                      placeholder="Enter path (e.g. ~/Desktop or /home/user/Pictures)"
+                      placeholder={"Enter path (e.g. ~/Pictures or C:\\Users\\You\\Pictures)"}
                       className="flex-1 px-3 py-2 bg-secondary border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-accent font-mono text-xs transition-colors"
                     />
                     <Button
@@ -400,7 +400,7 @@ export function PreferencesPage({ onBack, onSettingsChange }: PreferencesPagePro
                   <div>
                     <h3 className="text-base font-semibold text-foreground">FrameXShot</h3>
                     <p className="text-xs text-muted-foreground mt-0.5">
-                      Professional Linux Desktop Screenshot Suite with Native Canvas Editing
+                      Professional Desktop Screenshot Suite with Native Canvas Editing
                     </p>
                   </div>
                   <span className="px-3 py-1 rounded-full bg-secondary border border-border text-xs font-mono text-foreground">

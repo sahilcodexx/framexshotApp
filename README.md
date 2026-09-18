@@ -1,12 +1,12 @@
 # FrameXShot
 
-A fast, open-source **Linux screenshot tool** built with Tauri v2 + React. Capture, edit, and enhance your screenshots with professional quality — entirely offline, entirely local.
+A fast, open-source **cross-platform screenshot tool** built with Tauri v2 + React — first-class on Linux (X11 + Wayland), with native Windows and macOS builds. Capture, edit, and enhance your screenshots with professional quality — entirely offline, entirely local.
 
 [![License: BSD 3-Clause](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](LICENSE)
 [![Tauri](https://img.shields.io/badge/Tauri-v2-24C8D8?logo=tauri)](https://tauri.app)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript)](https://www.typescriptlang.org)
-[![Platform](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=black)](https://www.linux.org)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-informational)](#-install)
 
 > Lives in the system tray, captures with a keypress, applies backgrounds / effects / annotations — all in a slick adaptive UI (light / dark via shadcn oklch) powered by Rust + React.
 
@@ -25,7 +25,11 @@ No cloud. No telemetry. Everything happens locally.
 | **Window** | Capture a specific application window | `Ctrl+Shift+D` |
 | **OCR Region** | Extract text from a selected region (copies to clipboard) | `Ctrl+Shift+O` |
 
-All shortcuts are customisable in Preferences. Capture works on X11 and Wayland via `xcap`, `grim` + `slurp`, `spectacle`, `cosmic-screenshot`, and the GNOME Shell / xdg-desktop-portal D-Bus interfaces — automatic fallback per desktop environment.
+All shortcuts are customisable in Preferences.
+
+- **Linux** — capture works on X11 and Wayland via `xcap`, `grim` + `slurp`, `spectacle`, `cosmic-screenshot`, and the GNOME Shell / xdg-desktop-portal D-Bus interfaces — automatic fallback per desktop environment.
+- **Windows** — capture runs through the `xcap` crate on the Windows GDI path (`BitBlt`). No external capture tool is required and no system permission is requested.
+- **macOS** — capture goes through the platform capture backend (`xcap`) and requires Screen Recording permission.
 
 ### Image Editor
 
@@ -124,7 +128,41 @@ The Flatpak includes all runtime dependencies (WebKitGTK, portal, etc.) so it wo
 
 ### 🖥️ Windows
 
-Download `framexshot_<version>_x64-setup.exe` and run the installer — no extra dependencies.
+Download `framexshot_<version>_x64-setup.exe` and run the installer — **NSIS** is the Windows installer target, so there is no MSI/WiX toolchain to install.
+
+**Windows prerequisites**
+
+| Requirement | Needed for |
+|-------------|-----------|
+| **WebView2 runtime** | Rendering the UI. Preinstalled on Windows 11 and current Windows 10; the installer can fetch it if it is missing. |
+| **Tesseract OCR** | The **OCR Region** feature only. Install the [UB Mannheim build](https://github.com/UB-Mannheim/tesseract/wiki) and make sure `tesseract.exe` is on your `PATH`. |
+| **Rust MSVC toolchain** | Building from source only: `rustup default stable-msvc`, plus the *Desktop development with C++* workload from Visual Studio Build Tools. |
+
+**Build & run from source on Windows**
+
+```powershell
+pnpm install
+pnpm tauri dev     # dev build with HMR
+pnpm tauri build   # release build + NSIS installer
+```
+
+> This repo pins `pnpm` (`packageManager` in `package.json`, plus `pnpm-lock.yaml` / `pnpm-workspace.yaml`). If you prefer npm, the equivalents are `npm install`, `npm run tauri dev`, and `npm run tauri build`.
+
+Build artifacts land in `src-tauri/target/release/bundle/nsis/`. `nsis` is the only Windows installer target configured in `tauri.conf.json`; the `deb` / `rpm` / `dmg` targets are simply ignored when building on Windows.
+
+**Windows capture backend**
+
+- **Screen capture** — the [`xcap`](https://crates.io/crates/xcap) crate with the **`wgc`** feature, i.e. Windows.Graphics.Capture rather than the older GDI `BitBlt` path. No `grim` / `slurp` / `spectacle` equivalent is needed, and Windows has no screen-recording permission prompt to grant.
+- **Folder picker** — `tauri-plugin-dialog`, i.e. the native Windows folder browser.
+- **Shutter sound** — the Win32 `MessageBeep` API.
+- **Cursor position** — the Win32 `GetCursorPos` API.
+- **Region overlay** — a borderless always-on-top window moved and sized to cover the monitor under the cursor. That same monitor is the one captured, so selections are correct on multi-monitor and mixed-DPI setups.
+
+**Known Windows limitations**
+
+- **Region capture works on one monitor at a time.** The overlay covers whichever monitor the cursor is on, so any single display can be used — but a region *spanning* two monitors is not supported. *Fullscreen* capture does stitch all monitors into one virtual-desktop image.
+- **WGC requires Windows 10 1903 (build 18362) or newer.** On Windows 10 the OS draws a yellow border around the surface while it is being captured; Windows 11 suppresses it.
+- **OCR needs Tesseract installed separately.** It is not bundled — see the prerequisites table above. FrameXShot detects it at startup and tells you how to install it if it is missing, rather than failing mid-capture.
 
 ### 🍎 macOS
 
@@ -137,6 +175,60 @@ open framexshot_<version>_aarch64.dmg
 # Intel
 open framexshot_<version>_x64.dmg
 ```
+
+**macOS prerequisites**
+
+| Requirement | Needed for |
+|-------------|-----------|
+| **Screen Recording permission** | Window capture (macOS 10.15+). Grant it in *System Settings → Privacy & Security → Screen Recording*. |
+| **Tesseract OCR** | The **OCR Region** feature only. Install with `brew install tesseract`. |
+| **Xcode Command Line Tools + Rust** | Building from source only: `xcode-select --install`, then the stable Rust toolchain. |
+
+**Build & run from source on macOS**
+
+```bash
+pnpm install
+pnpm tauri dev     # dev build with HMR
+pnpm tauri build   # release build + .dmg bundle
+```
+
+> This repo pins `pnpm` (`packageManager` in `package.json`, plus `pnpm-lock.yaml` / `pnpm-workspace.yaml`). If you prefer npm, the equivalents are `npm install`, `npm run tauri dev`, and `npm run tauri build`.
+
+Build artifacts land in `src-tauri/target/release/bundle/dmg/`. `dmg` is the only macOS bundle target configured in `tauri.conf.json`; the `deb` / `rpm` / `nsis` targets are simply ignored when building on macOS.
+
+**macOS capture backend**
+
+- **Screen capture** — the [`xcap`](https://crates.io/crates/xcap) crate on its CoreGraphics backend (`CGWindowListCreateImage`). No `grim` / `slurp` / `spectacle` equivalent is needed.
+- **Folder picker** — `tauri-plugin-dialog`, i.e. the native macOS folder browser.
+- **Shutter sound** — `afplay` on a system sound (`/System/Library/Sounds/Glass.aiff`, falling back to `Ping.aiff`).
+- **Cursor position** — `CGEventGetLocation` via a small CoreGraphics FFI shim (`src-tauri/src/mac_api.rs`).
+- **Region overlay** — a borderless always-on-top window moved and sized to cover the monitor under the cursor. Deliberately *not* native fullscreen, which would exile the overlay to its own Space behind a ~1s animation and render it against a black backdrop.
+
+**Screen Recording permission (required)**
+
+macOS 10.15+ gates all screen capture behind the *Screen Recording* TCC permission. FrameXShot checks for it before every capture and, if it is missing, shows a message with an **Open Settings** button instead of capturing.
+
+This matters because the failure is otherwise silent: without permission `CGWindowListCreateImage` does **not** error — it returns your desktop wallpaper with every window missing, which looks like a working capture of an empty desktop.
+
+1. System Settings → Privacy & Security → Screen Recording → enable **FrameXShot**
+2. **Quit and reopen FrameXShot.** macOS caches the permission answer for the lifetime of the process, so granting it does not take effect until a restart.
+
+**Gatekeeper on unsigned builds**
+
+If a release was built without an Apple Developer certificate, macOS reports *"FrameXShot is damaged and can't be opened."* That message is about the missing code signature, not a corrupt download:
+
+```bash
+xattr -cr /Applications/framexshot.app
+```
+
+The release workflow signs and notarizes automatically once the `APPLE_*` repository secrets are configured — see the comments in `.github/workflows/release.yml`.
+
+**Known macOS limitations**
+
+- **Region capture works on one monitor at a time.** The overlay covers whichever monitor the cursor is on, so any single display can be used — but a region *spanning* two monitors is not supported. *Fullscreen* capture does stitch all monitors into one virtual-desktop image.
+- **The menu bar and Dock stay on top of the region overlay.** Tauri's always-on-top maps to `NSFloatingWindowLevel` (3), which is below `NSMainMenuWindowLevel` (24), and a higher level is not reachable through Tauri's public API. The captured image still includes those areas and selection coordinates are unaffected — but a drag *starting* on the menu bar strip goes to the menu bar.
+- **macOS 10.15 (Catalina) is the minimum.** The Screen Recording permission APIs the app links against do not exist before it.
+- **OCR needs Tesseract installed separately.** Install it with `brew install tesseract`. FrameXShot detects it and tells you how to install it if it is missing, rather than failing mid-capture.
 
 ---
 
@@ -226,6 +318,24 @@ sudo zypper install -y gtk3-devel libwebkit2gtk-4_1-devel \
   libxdo-devel clang-devel pipewire-devel
 ```
 
+**Windows (MSVC):**
+
+No GTK / WebKitGTK / appindicator packages are needed. You need the MSVC Rust toolchain, the MSVC C++ build tools, and the WebView2 runtime (plus Node.js 20+ and pnpm 10+ from the table above):
+
+```powershell
+# Rust, MSVC toolchain
+rustup default stable-msvc
+
+# Visual Studio Build Tools with the "Desktop development with C++" workload
+winget install Microsoft.VisualStudio.2022.BuildTools
+
+# WebView2 runtime (already present on Windows 11 and current Windows 10)
+winget install Microsoft.EdgeWebView2Runtime
+
+# Optional — only for the OCR Region feature
+winget install UB-Mannheim.TesseractOCR
+```
+
 ### Clone & Build
 
 ```bash
@@ -309,7 +419,7 @@ pnpm test:rust       # cargo test (Rust unit tests)
 | Tray lifecycle | Close → hide to tray; Quit from tray → `app.exit(0)` |
 | Theme | shadcn oklch `light` (`:root`) / `dark` (`.dark`), `@custom-variant dark`, `useTheme` persisting to `settings.json` |
 
-**Stack:** Tauri v2 · React 19 · TypeScript 5.8 · Vite 7 · Zustand · Tailwind CSS v4 + shadcn oklch (`@custom-variant dark`, `@theme inline`) · xcap (X11/Wayland)
+**Stack:** Tauri v2 · React 19 · TypeScript 5.8 · Vite 7 · Zustand · Tailwind CSS v4 + shadcn oklch (`@custom-variant dark`, `@theme inline`) · xcap (Linux X11/Wayland · Windows GDI)
 
 ---
 
