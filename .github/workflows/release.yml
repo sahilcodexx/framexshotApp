@@ -104,6 +104,50 @@ jobs:
           echo "$COMMITS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
+      # ── macOS code signing + notarization ──────────────────────────────
+      # Without these the DMG is unsigned and un-notarized, and Gatekeeper
+      # refuses to open it on any machine that did not build it — users see
+      # "FrameXShot is damaged and can't be opened. You should move it to
+      # the Bin." That is not a bug in the app; it is the unsigned-binary
+      # path, and there is no code-level workaround.
+      #
+      # IMPORTANT: tauri-action v0 calls `security import` on the certificate
+      # the moment APPLE_CERTIFICATE is set — even when the env var is an
+      # empty string. So we cannot just default the secrets to '' here:
+      # an unset secret must translate to an *unset* env var, otherwise
+      # macOS jobs fail with `SecKeychainItemImport: ... not valid`.
+      #
+      # The previous revision defaulted them all to '' and the macOS matrix
+      # entries failed on every release for that reason. This step gates on
+      # ALL six Apple secrets being non-empty, and uses `$GITHUB_ENV` so the
+      # vars land in the next step's environment ONLY when signing is wanted.
+      # When any one is missing, none of them are exported and tauri-action
+      # silently skips signing (it reads them via std::env::var, which
+      # returns None for unset).
+      #
+      # To turn signing on, set these six repository secrets — they require
+      # a paid Apple Developer account:
+      #   APPLE_CERTIFICATE          base64 of a "Developer ID Application" .p12
+      #                              (base64 -i cert.p12 | pbcopy)
+      #   APPLE_CERTIFICATE_PASSWORD the .p12 export password
+      #   APPLE_SIGNING_IDENTITY     e.g. "Developer ID Application: Name (TEAMID)"
+      #   APPLE_ID                   your Apple ID email
+      #   APPLE_PASSWORD             an app-specific password, NOT the account password
+      #   APPLE_TEAM_ID              the 10-character team id
+      - name: Configure Apple signing (when all six secrets are set)
+        id: apple_signing
+        if: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+        run: |
+          {
+            echo "APPLE_CERTIFICATE=${{ secrets.APPLE_CERTIFICATE }}"
+            echo "APPLE_CERTIFICATE_PASSWORD=${{ secrets.APPLE_CERTIFICATE_PASSWORD }}"
+            echo "APPLE_SIGNING_IDENTITY=${{ secrets.APPLE_SIGNING_IDENTITY }}"
+            echo "APPLE_ID=${{ secrets.APPLE_ID }}"
+            echo "APPLE_PASSWORD=${{ secrets.APPLE_PASSWORD }}"
+            echo "APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}"
+          } >> "$GITHUB_ENV"
+          echo "Apple signing enabled (all 6 secrets present)."
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -115,37 +159,6 @@ jobs:
           # The strip in Cargo.toml [profile.release] still runs (that uses the
           # host's strip, which is new enough on the Ubuntu 24.04 runner).
           NO_STRIP: "1"
-
-          # ── macOS code signing + notarization ──────────────────────────────
-          # Without these the DMG is unsigned and un-notarized, and Gatekeeper
-          # refuses to open it on any machine that did not build it — users see
-          # "FrameXShot is damaged and can't be opened. You should move it to
-          # the Bin." That is not a bug in the app; it is the unsigned-binary
-          # path, and there is no code-level workaround.
-          #
-          # tauri-action imports APPLE_CERTIFICATE into a temporary keychain and
-          # signs with APPLE_SIGNING_IDENTITY, then notarizes with the APPLE_ID
-          # credentials (or APPLE_API_* if you prefer App Store Connect keys).
-          # Every one of these is read from secrets, so when the secrets are not
-          # configured they expand to empty strings, signing is skipped, and the
-          # build behaves exactly as it does today. Nothing here breaks the
-          # Linux or Windows jobs.
-          #
-          # To turn signing on, set these repository secrets — they require a
-          # paid Apple Developer account:
-          #   APPLE_CERTIFICATE          base64 of a "Developer ID Application" .p12
-          #                              (base64 -i cert.p12 | pbcopy)
-          #   APPLE_CERTIFICATE_PASSWORD the .p12 export password
-          #   APPLE_SIGNING_IDENTITY     e.g. "Developer ID Application: Name (TEAMID)"
-          #   APPLE_ID                   your Apple ID email
-          #   APPLE_PASSWORD             an app-specific password, NOT the account password
-          #   APPLE_TEAM_ID              the 10-character team id
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'FrameXShot ${{ github.ref_name }}'
@@ -167,11 +180,6 @@ jobs:
             sudo pacman -U ./framexshot_${{ env.APP_VERSION }}_x86_64.pkg.tar.zst
             ```
             Compiles against your system WebKit/GTK; capture uses `grim`+`slurp` directly (no Flatpak portal sandbox). Install optional Hyprland helpers: `sudo pacman -S hyprshot hyprland-contrib xdg-desktop-portal-hyprland`.
-
-            **Arch (AUR):**
-            ```sh
-            yay -S framexshot
-            ```
 
             **Flatpak (every distro, self-contained runtime):**
             ```sh
