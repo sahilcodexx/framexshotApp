@@ -111,19 +111,14 @@ jobs:
       # the Bin." That is not a bug in the app; it is the unsigned-binary
       # path, and there is no code-level workaround.
       #
-      # IMPORTANT: tauri-action v0 calls `security import` on the certificate
-      # the moment APPLE_CERTIFICATE is set — even when the env var is an
-      # empty string. So we cannot just default the secrets to '' here:
-      # an unset secret must translate to an *unset* env var, otherwise
-      # macOS jobs fail with `SecKeychainItemImport: ... not valid`.
-      #
-      # The previous revision defaulted them all to '' and the macOS matrix
-      # entries failed on every release for that reason. This step gates on
-      # ALL six Apple secrets being non-empty, and uses `$GITHUB_ENV` so the
-      # vars land in the next step's environment ONLY when signing is wanted.
-      # When any one is missing, none of them are exported and tauri-action
-      # silently skips signing (it reads them via std::env::var, which
-      # returns None for unset).
+      # We pass the six APPLE_* secrets to tauri-action via the `with:`
+      # inputs (not `env:`). tauri-action v0 reads them as
+      # std::env::var("INPUT_APPLLE...") and applies `.filter(|s| !s.is_empty())`,
+      # so when a secret is unset it expands to an empty string and the
+      # action silently skips signing. No conditional step is needed, and
+      # `secrets` is never referenced in an `if:` expression (which the
+      # GitHub Actions runner forbids as a security measure to avoid
+      # leaking secret values through run logs).
       #
       # To turn signing on, set these six repository secrets — they require
       # a paid Apple Developer account:
@@ -134,26 +129,6 @@ jobs:
       #   APPLE_ID                   your Apple ID email
       #   APPLE_PASSWORD             an app-specific password, NOT the account password
       #   APPLE_TEAM_ID              the 10-character team id
-      - name: Configure Apple signing (when all six secrets are set)
-        id: apple_signing
-        if: |
-          secrets.APPLE_CERTIFICATE != '' &&
-          secrets.APPLE_CERTIFICATE_PASSWORD != '' &&
-          secrets.APPLE_SIGNING_IDENTITY != '' &&
-          secrets.APPLE_ID != '' &&
-          secrets.APPLE_PASSWORD != '' &&
-          secrets.APPLE_TEAM_ID != ''
-        run: |
-          {
-            echo "APPLE_CERTIFICATE=${{ secrets.APPLE_CERTIFICATE }}"
-            echo "APPLE_CERTIFICATE_PASSWORD=${{ secrets.APPLE_CERTIFICATE_PASSWORD }}"
-            echo "APPLE_SIGNING_IDENTITY=${{ secrets.APPLE_SIGNING_IDENTITY }}"
-            echo "APPLE_ID=${{ secrets.APPLE_ID }}"
-            echo "APPLE_PASSWORD=${{ secrets.APPLE_PASSWORD }}"
-            echo "APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}"
-          } >> "$GITHUB_ENV"
-          echo "Apple signing enabled (all 6 secrets present)."
-
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -168,6 +143,14 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'FrameXShot ${{ github.ref_name }}'
+          # Apple signing — empty inputs make tauri-action skip signing.
+          # See comment block above.
+          appleCertBase64: ${{ secrets.APPLE_CERTIFICATE }}
+          appleCertPassword: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          signingIdentity: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          appleId: ${{ secrets.APPLE_ID }}
+          applePassword: ${{ secrets.APPLE_PASSWORD }}
+          appleTeamId: ${{ secrets.APPLE_TEAM_ID }}
           releaseBody: |
             ## Downloads & Installation
 
