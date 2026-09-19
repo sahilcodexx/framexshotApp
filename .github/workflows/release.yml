@@ -136,7 +136,13 @@ jobs:
       #   APPLE_TEAM_ID              the 10-character team id
       - name: Configure Apple signing (when all six secrets are set)
         id: apple_signing
-        if: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+        if: |
+          secrets.APPLE_CERTIFICATE != '' &&
+          secrets.APPLE_CERTIFICATE_PASSWORD != '' &&
+          secrets.APPLE_SIGNING_IDENTITY != '' &&
+          secrets.APPLE_ID != '' &&
+          secrets.APPLE_PASSWORD != '' &&
+          secrets.APPLE_TEAM_ID != ''
         run: |
           {
             echo "APPLE_CERTIFICATE=${{ secrets.APPLE_CERTIFICATE }}"
