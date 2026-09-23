@@ -1,13 +1,13 @@
 cask "framexshot" do
-  version "1.1.0"
+  version "1.2.0"
 
   on_arm do
     url "https://github.com/sahilcodexx/framexshotApp/releases/download/v#{version}/framexshot_#{version}_aarch64.dmg"
-    sha256 "1131178c3423fd2da7e0593da77a6483b4b800a37d182a0da616ee0cb4fd0781"
+    sha256 "9b82f69914284ae0a93292743aae109f41bd3b11c09be8dbc0efedc6b7d642fa"
   end
   on_intel do
     url "https://github.com/sahilcodexx/framexshotApp/releases/download/v#{version}/framexshot_#{version}_x64.dmg"
-    sha256 "fd242dff75cd9ca5bc64d4e4937753960ac3f0484f600020c27ebe23547c0f44"
+    sha256 "228943e962c792ad293168d1f5cdc139f65b0ea900b8c6ad079d7eed60fd02cf"
   end
 
   name "FrameXShot"
