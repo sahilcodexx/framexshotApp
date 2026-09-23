@@ -188,7 +188,7 @@ jobs:
 
             **Build from source (against your system libs):**
             ```sh
-            curl -fsSL https://raw.githubusercontent.com/sahilcodexx/framexshot/main/packaging/install.sh | sh
+            curl -fsSL https://raw.githubusercontent.com/sahilcodexx/framexshotApp/main/packaging/install.sh | sh
             ```
 
             ### Windows
