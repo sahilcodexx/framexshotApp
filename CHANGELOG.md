@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-23
+
+**One-line macOS install + Homebrew tap.** A universal installer script at the repo root, a Homebrew cask that clears Gatekeeper automatically, and a fix that made the Linux build-from-source installer 404 for every end user.
+
+### Installer
+
+- **New universal `install.sh`** (repo root) — detects the OS via `uname -s`:
+  - **macOS**: resolves the latest release tag via the GitHub API (or `FXS_VERSION` to pin), picks the chip-matching DMG (`arm64` → `*_aarch64.dmg`, `x86_64` → `*_x64.dmg`), mounts with `hdiutil`, replaces `/Applications/framexshot.app`, unmounts, and runs `xattr -cr` so Gatekeeper never blocks the app. No Apple Developer certificate required.
+  - **Linux**: delegates to the existing `packaging/install.sh` build-from-source flow.
+  - Works piped: `curl -fsSL https://raw.githubusercontent.com/sahilcodexx/framexshotApp/main/install.sh | sh`
+- **Linux installer repo slug fixed**: `packaging/install.sh` pointed at the private `sahilcodexx/framexshot` repo, so unauthenticated tag/tarball requests 404'd for every end user. It now uses the public `sahilcodexx/framexshotApp` repo.
+
+### macOS
+
+- **Homebrew tap cask staged** (`packaging/homebrew-framexshot/Casks/framexshot.rb`) for `sahilcodexx/homebrew-framexshot` — `on_arm` / `on_intel` blocks point at the per-architecture release DMGs, and a `postflight` step runs `xattr -cr` so `brew install --cask framexshot` needs no manual Gatekeeper step.
+- **README — Gatekeeper section rewritten** with all three macOS install paths: Homebrew, the universal curl script, and a step-by-step zero-Terminal "Open Anyway" walkthrough for non-technical users (with screenshot-style descriptions).
+
 ## [1.1.0] - 2026-09-18
 
 **Windows and macOS support.** FrameXShot now builds and runs on Windows (x86_64) and macOS alongside Linux. The capture *flow* is unchanged — what's new is the Windows/macOS capture backend and the platform-conditional UI.
