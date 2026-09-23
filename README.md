@@ -215,7 +215,45 @@ This matters because the failure is otherwise silent: without permission `CGWind
 
 **Gatekeeper on unsigned builds**
 
-If a release was built without an Apple Developer certificate, macOS reports *"FrameXShot is damaged and can't be opened."* That message is about the missing code signature, not a corrupt download:
+If a release was built without an Apple Developer certificate, macOS quarantines the download and reports *"FrameXShot is damaged and can't be opened."* That message is about the missing code signature, not a corrupt download — no code signing certificate is needed to fix it. There are three ways to install on macOS; the first two clear the quarantine automatically, so Gatekeeper never appears:
+
+**(a) Homebrew (recommended — zero Gatekeeper steps)**
+
+```bash
+brew tap sahilcodexx/framexshot
+brew install --cask framexshot
+```
+
+The cask downloads the DMG for your architecture (Apple Silicon vs Intel), installs to `/Applications`, and runs `xattr -cr` for you — the app opens on the very first try.
+
+**(b) Universal install script (one line)**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sahilcodexx/framexshotApp/main/install.sh | sh
+```
+
+The script detects macOS (or Linux) and your chip, downloads the matching DMG from the [latest release](https://github.com/sahilcodexx/framexshotApp/releases/latest), replaces `/Applications/framexshot.app`, and runs `xattr -cr` so no Gatekeeper dialog ever appears. To pin a specific version, set `FXS_VERSION` on the `sh` side of the pipe:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sahilcodexx/framexshotApp/main/install.sh | FXS_VERSION=1.1.0 sh
+```
+
+**(c) Manual install — no Terminal, for non-technical users**
+
+1. **Find out which Mac you have, then download the matching DMG.** Click the Apple menu in the top-left corner of the screen → **About This Mac** — it says either *Apple chip* or *Intel*. Then open the [latest release page](https://github.com/sahilcodexx/framexshotApp/releases/latest), click **Assets** at the bottom of the release notes, and download `framexshot_<version>_aarch64.dmg` for Apple chip (for example `framexshot_1.1.0_aarch64.dmg`) or `framexshot_<version>_x64.dmg` for Intel.
+   *[Screenshot: the GitHub release page with the two `.dmg` files highlighted under the Assets list.]*
+2. **Open the downloaded file.** Double-click the `.dmg` you just downloaded (from Safari's downloads list, or Finder → Downloads). A window opens showing the **FrameXShot** icon next to an **Applications** folder icon.
+   *[Screenshot: the mounted disk window with the FrameXShot icon beside the Applications folder.]*
+3. **Drag FrameXShot into Applications.** Drag the FrameXShot icon on top of the **Applications** folder icon and drop it, then wait for the copy to finish. Close the window and eject the mounted **framexshot** disk (right-click it on your Desktop → **Eject**, or drag it to the Trash).
+   *[Screenshot: an arrow dragging the FrameXShot icon onto the Applications folder.]*
+4. **Try to open it — this first attempt is blocked on purpose.** Open **Finder → Applications** and double-click **FrameXShot**. macOS shows a warning such as *“FrameXShot” is damaged and can't be opened* or *“FrameXShot” cannot be opened because the developer cannot be verified*. **Do not move it to the Trash** — just dismiss the dialog (click **Cancel** or **OK**, or press the `Esc` key).
+   *[Screenshot: the macOS warning dialog, with the dismiss button highlighted and the app still sitting in Applications.]*
+5. **Approve it in System Settings.** Click the Apple menu in the top-left corner → **System Settings…** (or **System Preferences…** on older macOS) → **Privacy & Security** in the sidebar → **scroll down**. Near the security section you'll see a message saying *“FrameXShot” was blocked from use because it is not from an identified developer*, with an **Open Anyway** button next to it — click **Open Anyway**.
+   *[Screenshot: System Settings → Privacy & Security, with the “Open Anyway” button next to the blocked-app notice highlighted.]*
+6. **Confirm once more.** If asked, authenticate with Touch ID or your password. macOS then asks one final time whether you're sure — click **Open**. FrameXShot launches normally, and you won't be asked again for this version.
+   *[Screenshot: the final “are you sure” confirmation dialog with the **Open** button highlighted.]*
+
+If macOS ever shows the “damaged” message again (for example after downloading a fresh DMG by hand), this one-liner fixes it instantly:
 
 ```bash
 xattr -cr /Applications/framexshot.app
