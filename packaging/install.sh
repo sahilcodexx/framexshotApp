@@ -7,7 +7,7 @@
 # against your system libraries (no AppImage/Flatpak/deb/rpm), and installs
 # it to /usr/local. This is the ONLY supported way to install on Linux.
 #
-#   curl -fsSL https://raw.githubusercontent.com/sahilcodexx/framexshot/main/packaging/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/sahilcodexx/framexshotApp/main/packaging/install.sh | sh
 #
 # Env overrides:
 #   FXS_VERSION   — build a specific tag (default: latest release tag)
@@ -18,7 +18,9 @@
 set -euo pipefail
 
 # ── Config ──────────────────────────────────────────────────────────────────
-REPO="sahilcodexx/framexshot"
+# Public repo — the old "sahilcodexx/framexshot" slug is a private repo, so
+# unauthenticated API/tarball requests 404 for end users.
+REPO="sahilcodexx/framexshotApp"
 GITHUB_URL="https://github.com/${REPO}"
 VERSION="${FXS_VERSION:-latest}"
 SKIP_DEPS="${FXS_SKIP_DEPS:-0}"
