@@ -156,6 +156,23 @@ export function getFrameStyle(id: FrameStyleId): FrameStyleDef {
   return FRAME_STYLES.find((s) => s.id === id) ?? FRAME_STYLES[0];
 }
 
+/**
+ * Scale a frame style's pixel dimensions by `s` (0 < s <= 1).
+ * Used when compositing the preview at reduced resolution so chrome
+ * (padding, strokes, glow) keeps the same proportions as the full-res export.
+ * Ratios (insetStrength, opacityFactor) are left untouched.
+ */
+export function scaleFrameStyle(style: FrameStyleDef, s: number): FrameStyleDef {
+  if (s === 1) return style;
+  return {
+    ...style,
+    padding: style.padding * s,
+    strokeWidth: style.strokeWidth * s,
+    innerStrokeWidth: style.innerStrokeWidth !== undefined ? style.innerStrokeWidth * s : undefined,
+    glowBlur: style.glowBlur !== undefined ? style.glowBlur * s : undefined,
+  };
+}
+
 // ============================================================================
 // Layout Presets (3D-ish tilt)
 // ============================================================================

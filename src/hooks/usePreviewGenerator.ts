@@ -9,6 +9,7 @@ import {
   applyLayoutTransform,
   layoutPaddingFactor,
   isLayoutTransformed,
+  scaleFrameStyle,
 } from "@/lib/frame-presets";
 
 import { resolveBackgroundPath, getAssetPath } from "@/lib/asset-registry";
@@ -192,17 +193,55 @@ function drawBackground(
 
 
 /**
+ * Logical (full-resolution) size of the composed frame for the given settings
+ * and padding — exactly what renderFullCanvas would produce WITHOUT
+ * `maxDimension`. The canvas display layer uses this so the on-screen size and
+ * annotation coordinate space stay stable while drag frames render at reduced
+ * resolution (900px) and settle frames at full preview resolution (1400px).
+ */
+export function getFrameDimensions(
+  screenshotImage: HTMLImageElement,
+  settings: EditorSettings,
+  padding: { top: number; bottom: number; left: number; right: number }
+): { width: number; height: number } {
+  const layoutId = settings.layoutPreset || "flat";
+  const extraFactor = layoutPaddingFactor(layoutId);
+  const styleDef = getFrameStyle(settings.frameStyle || "default");
+  const framePad = (settings.framePadding !== undefined && settings.framePadding >= 0)
+    ? settings.framePadding
+    : styleDef.padding;
+  const scale = settings.imageScale ?? 1.0;
+  const scaledWidth = Math.round(screenshotImage.width * scale);
+  const scaledHeight = Math.round(screenshotImage.height * scale);
+  const extraX = Math.round(scaledWidth * extraFactor);
+  const extraY = Math.round(scaledHeight * extraFactor);
+  return {
+    width:
+      scaledWidth + padding.left + padding.right + extraX * 2 + framePad * 2,
+    height:
+      scaledHeight + padding.top + padding.bottom + extraY * 2 + framePad * 2,
+  };
+}
+
+/**
  * Full editor composite: background + effects + framed screenshot + layout + shadow.
  * Shared by live preview and high-quality export so they stay in sync.
+ *
+ * Pass `maxDimension` to render the whole composite directly at a reduced
+ * resolution (used by the live preview): every dimension — padding, image
+ * draw size, frame chrome, shadow — is multiplied by the same factor `s`,
+ * so the result is identical (up to rounding) to a downscaled full-res
+ * render, but at a fraction of the pixel work.
  */
 export function renderFullCanvas(
   screenshotImage: HTMLImageElement,
   settings: EditorSettings,
   padding: { top: number; bottom: number; left: number; right: number },
   bgImage: HTMLImageElement | null,
-  options: { renderEffects: boolean } = { renderEffects: true }
+  options: { renderEffects?: boolean; maxDimension?: number } = { renderEffects: true }
 ): HTMLCanvasElement {
   const { top: paddingTop, bottom: paddingBottom, left: paddingLeft, right: paddingRight } = padding;
+  const renderEffects = options.renderEffects !== false;
   const layoutId = settings.layoutPreset || "flat";
   const extraFactor = layoutPaddingFactor(layoutId);
   const styleId = settings.frameStyle || "default";
@@ -216,14 +255,33 @@ export function renderFullCanvas(
   const scaledWidth = Math.round(screenshotImage.width * scale);
   const scaledHeight = Math.round(screenshotImage.height * scale);
 
-  const extraX = Math.round(scaledWidth * extraFactor);
-  const extraY = Math.round(scaledHeight * extraFactor);
-  const bgWidth =
-    scaledWidth + paddingLeft + paddingRight + extraX * 2 + framePad * 2;
-  const bgHeight =
-    scaledHeight + paddingTop + paddingBottom + extraY * 2 + framePad * 2;
-  const contentPadL = paddingLeft + extraX + framePad;
-  const contentPadT = paddingTop + extraY + framePad;
+  const fullExtraX = Math.round(scaledWidth * extraFactor);
+  const fullExtraY = Math.round(scaledHeight * extraFactor);
+  const fullWidth =
+    scaledWidth + paddingLeft + paddingRight + fullExtraX * 2 + framePad * 2;
+  const fullHeight =
+    scaledHeight + paddingTop + paddingBottom + fullExtraY * 2 + framePad * 2;
+
+  // Uniform output scale: 1 for full-res export, <1 when rendering the live preview.
+  const s = options.maxDimension
+    ? Math.min(1, options.maxDimension / Math.max(fullWidth, fullHeight))
+    : 1;
+
+  // Everything below is computed in OUTPUT space (already multiplied by s).
+  const drawW = Math.round(scaledWidth * s);
+  const drawH = Math.round(scaledHeight * s);
+  const extraX = Math.round(drawW * extraFactor);
+  const extraY = Math.round(drawH * extraFactor);
+  const padL = paddingLeft * s;
+  const padR = paddingRight * s;
+  const padT = paddingTop * s;
+  const padB = paddingBottom * s;
+  const outFramePad = framePad * s;
+
+  const bgWidth = drawW + padL + padR + extraX * 2 + outFramePad * 2;
+  const bgHeight = drawH + padT + padB + extraY * 2 + outFramePad * 2;
+  const contentPadL = padL + extraX + outFramePad;
+  const contentPadT = padT + extraY + outFramePad;
 
   const canvas = document.createElement("canvas");
   canvas.width = bgWidth;
@@ -234,14 +292,14 @@ export function renderFullCanvas(
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
 
-  const totalPadding = paddingTop + paddingBottom + paddingLeft + paddingRight;
+  const totalPadding = padT + padB + padL + padR;
   if (totalPadding === 0) {
     ctx.beginPath();
-    ctx.roundRect(0, 0, scaledWidth, scaledHeight, settings.borderRadius);
+    ctx.roundRect(0, 0, drawW, drawH, settings.borderRadius * s);
     ctx.closePath();
     ctx.clip();
-    ctx.drawImage(screenshotImage, 0, 0, scaledWidth, scaledHeight);
-    applyImageAdjustments(ctx, 0, 0, scaledWidth, scaledHeight, {
+    ctx.drawImage(screenshotImage, 0, 0, drawW, drawH);
+    applyImageAdjustments(ctx, 0, 0, drawW, drawH, {
       brightness: settings.brightness ?? 0,
       contrast: settings.contrast ?? 0,
       saturation: settings.saturation ?? 0,
@@ -257,24 +315,26 @@ export function renderFullCanvas(
   const tempCtx = tempCanvas.getContext("2d")!;
   drawBackground(tempCtx, bgWidth, bgHeight, settings, bgImage);
 
-  if (options.renderEffects && settings.blurAmount > 0) {
-    applyFastBoxBlur(tempCanvas, settings.blurAmount);
+  // Blur radius / noise amplitude scale with `s` too, so the reduced-resolution
+  // preview still matches what the full-res export looks like when downscaled.
+  if (renderEffects && settings.blurAmount > 0) {
+    applyFastBoxBlur(tempCanvas, settings.blurAmount * s);
   }
-  if (options.renderEffects && settings.noiseAmount > 0) {
-    applyNoise(tempCanvas, settings.noiseAmount);
+  if (renderEffects && settings.noiseAmount > 0) {
+    applyNoise(tempCanvas, settings.noiseAmount * s);
   }
 
   ctx.drawImage(tempCanvas, 0, 0);
 
-  const framed = buildFramedScreenshot(screenshotImage, settings);
+  const framed = buildFramedScreenshot(screenshotImage, settings, s);
   if (!framed) throw new Error("Failed to build framed screenshot");
 
   const contentW = framed.width;
   const contentH = framed.height;
 
   // Independent position offset (pan) on the background canvas
-  const offsetX = settings.imageOffsetX ?? 0;
-  const offsetY = settings.imageOffsetY ?? 0;
+  const offsetX = (settings.imageOffsetX ?? 0) * s;
+  const offsetY = (settings.imageOffsetY ?? 0) * s;
   const drawX = contentPadL + offsetX;
   const drawY = contentPadT + offsetY;
 
@@ -283,9 +343,9 @@ export function renderFullCanvas(
 
   ctx.save();
   ctx.shadowColor = `rgba(0, 0, 0, ${settings.shadow.opacity / 100})`;
-  ctx.shadowBlur = settings.shadow.blur;
-  ctx.shadowOffsetX = settings.shadow.offsetX;
-  ctx.shadowOffsetY = settings.shadow.offsetY;
+  ctx.shadowBlur = settings.shadow.blur * s;
+  ctx.shadowOffsetX = settings.shadow.offsetX * s;
+  ctx.shadowOffsetY = settings.shadow.offsetY * s;
 
   if (needsTransform) {
     const cx = drawX + contentW / 2;
@@ -309,22 +369,24 @@ export function renderFullCanvas(
 /**
  * Build the screenshot layer with optional mockup chrome + frame style chrome.
  * Returns a canvas ready to be drawn (with shadow / layout transform applied by caller).
+ * `s` is the output scale (1 = full res); all chrome geometry scales with it.
  */
 function buildFramedScreenshot(
   screenshotImage: HTMLImageElement,
-  settings: EditorSettings
+  settings: EditorSettings,
+  s: number = 1
 ): HTMLCanvasElement | null {
   const showMockup = settings.showMockup !== false;
   const frameType =
     showMockup && settings.windowFrame && settings.windowFrame !== "none"
       ? settings.windowFrame
       : "none";
-  const headerHeight = frameType === "none" ? 0 : 36;
-  const borderRadius = settings.borderRadius ?? 12;
+  const headerHeight = frameType === "none" ? 0 : Math.max(1, Math.round(36 * s));
+  const borderRadius = (settings.borderRadius ?? 12) * s;
 
   const scale = settings.imageScale ?? 1.0;
-  const scaledW = Math.round(screenshotImage.width * scale);
-  const scaledH = Math.round(screenshotImage.height * scale);
+  const scaledW = Math.round(screenshotImage.width * scale * s);
+  const scaledH = Math.round(screenshotImage.height * scale * s);
 
   const imageCanvas = document.createElement("canvas");
   imageCanvas.width = scaledW;
@@ -345,20 +407,20 @@ function buildFramedScreenshot(
     imageCtx.fillRect(0, 0, imageCanvas.width, headerHeight);
 
     const circleY = headerHeight / 2;
-    const radius = 6;
+    const radius = 6 * s;
 
     imageCtx.beginPath();
-    imageCtx.arc(18, circleY, radius, 0, Math.PI * 2);
+    imageCtx.arc(18 * s, circleY, radius, 0, Math.PI * 2);
     imageCtx.fillStyle = "#ff5f56";
     imageCtx.fill();
 
     imageCtx.beginPath();
-    imageCtx.arc(36, circleY, radius, 0, Math.PI * 2);
+    imageCtx.arc(36 * s, circleY, radius, 0, Math.PI * 2);
     imageCtx.fillStyle = "#ffbd2e";
     imageCtx.fill();
 
     imageCtx.beginPath();
-    imageCtx.arc(54, circleY, radius, 0, Math.PI * 2);
+    imageCtx.arc(54 * s, circleY, radius, 0, Math.PI * 2);
     imageCtx.fillStyle = "#27c93f";
     imageCtx.fill();
   } else if (frameType === "windows") {
@@ -366,14 +428,14 @@ function buildFramedScreenshot(
     imageCtx.fillRect(0, 0, imageCanvas.width, headerHeight);
 
     imageCtx.strokeStyle = "#cccccc";
-    imageCtx.lineWidth = 1.5;
-    const rightX = imageCanvas.width - 20;
+    imageCtx.lineWidth = Math.max(0.5, 1.5 * s);
+    const rightX = imageCanvas.width - 20 * s;
 
     imageCtx.beginPath();
-    imageCtx.moveTo(rightX - 6, headerHeight / 2 - 4);
-    imageCtx.lineTo(rightX + 2, headerHeight / 2 + 4);
-    imageCtx.moveTo(rightX + 2, headerHeight / 2 - 4);
-    imageCtx.lineTo(rightX - 6, headerHeight / 2 + 4);
+    imageCtx.moveTo(rightX - 6 * s, headerHeight / 2 - 4 * s);
+    imageCtx.lineTo(rightX + 2 * s, headerHeight / 2 + 4 * s);
+    imageCtx.moveTo(rightX + 2 * s, headerHeight / 2 - 4 * s);
+    imageCtx.lineTo(rightX - 6 * s, headerHeight / 2 + 4 * s);
     imageCtx.stroke();
   }
 
@@ -391,12 +453,12 @@ function buildFramedScreenshot(
   // Apply glass / inset / outline / border frame chrome
   const frameStyle = getFrameStyle(settings.frameStyle || "default");
   const framePaddingOverride = (settings.framePadding !== undefined && settings.framePadding >= 0)
-    ? settings.framePadding
+    ? settings.framePadding * s
     : undefined;
   const opacityFactor = (settings.frameOpacity !== undefined)
     ? settings.frameOpacity / 100
     : 1;
-  return applyFrameStyle(imageCanvas, frameStyle, borderRadius, {
+  return applyFrameStyle(imageCanvas, scaleFrameStyle(frameStyle, s), borderRadius, {
     paddingOverride: framePaddingOverride,
     opacityFactor,
   });
@@ -634,7 +696,17 @@ export interface PreviewGeneratorResult {
 
 const PREVIEW_DEBOUNCE_MS = 16;
 const EFFECTS_IDLE_MS = 200;
-const DRAG_THROTTLE_MS = 50;
+const DRAG_THROTTLE_MS = 34;
+/** Live preview is composited at this max dimension — see renderFullCanvas. */
+const MAX_PREVIEW_DIM = 1400;
+/** During a slider drag the preview drops to this max dimension — render +
+ * JPEG-encode cost scales with pixel area, and a slightly softer frame that
+ * tracks the cursor beats a crisp one that stutters. The settle render
+ * (effects on, 1400px) restores full detail ~150ms after the drag ends. */
+const DRAG_PREVIEW_DIM = 900;
+/** Slightly softer JPEG during drags for the same reason. */
+const DRAG_JPEG_QUALITY = 0.72;
+const PREVIEW_JPEG_QUALITY = 0.8;
 
 /**
  * Hook for generating preview images based on editor settings
@@ -654,12 +726,6 @@ export function usePreviewGenerator({
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Read the drag flag directly from the store. A selector here would
-  // re-render this hook on every drag pixel; the store's `_isDragging` is
-  // a separate slice that only sliders touch, so we can read it via
-  // getState() inside the effect without subscribing.
-  const isDraggingRef = useRef(false);
-
   const previewUrlRef = useRef<string | null>(null);
   const renderIdRef = useRef(0);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -667,6 +733,9 @@ export function usePreviewGenerator({
   const dragRegenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSettingsRef = useRef<EditorSettings | null>(null);
   const renderEffectsRef = useRef(false);
+  // Serialized settings at the last drag-frame render — the drag loop's
+  // change detector (skips renders when nothing moved).
+  const lastDragRenderKeyRef = useRef<string | null>(null);
 
   // Memoize background-related settings for comparison
   const bgSettingsKey = useMemo(() => {
@@ -692,8 +761,15 @@ export function usePreviewGenerator({
     const currentRenderId = ++renderIdRef.current;
     const canvas = canvasRef.current;
     const shouldRenderEffects = renderEffectsRef.current;
+    // Snapshot at render start. Drag frames render at reduced resolution +
+    // quality and skip the isGenerating state flips (two host re-renders of
+    // the whole editor per frame was pure waste — nothing reads the spinner
+    // during a drag); the settle render restores full detail.
+    const dragging = useEditorStore.getState()._isDragging;
 
-    setIsGenerating(true);
+    if (!dragging) {
+      setIsGenerating(true);
+    }
     setError(null);
 
     try {
@@ -710,18 +786,20 @@ export function usePreviewGenerator({
         settingsToRender,
         { top: paddingTop, bottom: paddingBottom, left: paddingLeft, right: paddingRight },
         bgImage,
-        { renderEffects: shouldRenderEffects }
+        {
+          renderEffects: shouldRenderEffects,
+          maxDimension: shouldRenderEffects ? MAX_PREVIEW_DIM : DRAG_PREVIEW_DIM,
+        }
       );
 
       if (currentRenderId !== renderIdRef.current) return;
 
-      // Downscale preview canvas for instant live preview (max 1400px width/height)
-      // Keeps slider dragging and zooming ultra-smooth at 60fps!
-      const MAX_PREVIEW_DIM = 1400;
-      const previewScale = Math.min(1.0, MAX_PREVIEW_DIM / Math.max(rendered.width, rendered.height));
-
-      canvas.width = Math.round(rendered.width * previewScale);
-      canvas.height = Math.round(rendered.height * previewScale);
+      // `rendered` is already at preview resolution (≤ MAX_PREVIEW_DIM) —
+      // the composite ran scaled end-to-end (padding, chrome, shadow, and all)
+      // instead of rendering full-res and downscaling afterwards. Keeps slider
+      // dragging and zooming ultra-smooth at a fraction of the pixel work.
+      canvas.width = rendered.width;
+      canvas.height = rendered.height;
       const ctx = canvas.getContext("2d", { alpha: true });
       if (!ctx) {
         setError("Failed to get canvas context");
@@ -729,16 +807,21 @@ export function usePreviewGenerator({
       }
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = "high";
-      ctx.drawImage(rendered, 0, 0, canvas.width, canvas.height);
+      ctx.drawImage(rendered, 0, 0);
 
       if (previewUrlRef.current) {
         URL.revokeObjectURL(previewUrlRef.current);
         previewUrlRef.current = null;
       }
-      const url = canvas.toDataURL("image/jpeg", 0.80);
+      const url = canvas.toDataURL(
+        "image/jpeg",
+        shouldRenderEffects ? PREVIEW_JPEG_QUALITY : DRAG_JPEG_QUALITY
+      );
       previewUrlRef.current = url;
       setPreviewUrl(url);
-      setIsGenerating(false);
+      if (!dragging) {
+        setIsGenerating(false);
+      }
     } catch (err) {
       if (currentRenderId === renderIdRef.current) {
         const message = err instanceof Error ? err.message : String(err);
@@ -749,14 +832,15 @@ export function usePreviewGenerator({
     }
   }, [screenshotImage, canvasRef, paddingTop, paddingBottom, paddingLeft, paddingRight]);
 
-  // Throttled preview generation + idle detection for effects.
-  // While a slider is being dragged, we regen the canvas on a fixed cadence
-  // (DRAG_THROTTLE_MS, no effects) so the preview tracks the cursor
-  // continuously instead of jumping once on release. The regen loop runs
-  // independently of the settings effect — it polls `pendingSettingsRef`
-  // every DRAG_THROTTLE_MS, so the per-pixel settings updates don't
-  // accumulate or starve the render. The full regen with effects runs
-  // after the drag ends.
+  // Keep the LATEST generatePreview reachable from store subscriptions and
+  // timers. A fresh closure is created whenever padding/screenshot changes,
+  // and the drag regen loop below must never call a stale one (stale padding
+  // = preview frozen at the value the drag started with).
+  const generatePreviewRef = useRef(generatePreview);
+  useEffect(() => {
+    generatePreviewRef.current = generatePreview;
+  });
+
   // Keep `pendingSettingsRef` pointed at the latest settings on every render.
   //
   // This assignment used to live at the top of the big debounce effect below,
@@ -771,50 +855,34 @@ export function usePreviewGenerator({
     pendingSettingsRef.current = settings;
   });
 
+  // Debounced preview generation + idle detection for effects (non-drag path).
+  // While a slider is being dragged this effect deliberately does nothing:
+  // rendering is owned by the drag regen loop subscribed below. This effect's
+  // cleanup fires on every per-pixel settings update, so any drag timer created
+  // here would be cleared on the very next pixel — the preview would freeze
+  // mid-drag and only jump once the drag ends.
   useEffect(() => {
     if (!screenshotImage || !canvasRef.current) return;
+    if (useEditorStore.getState()._isDragging) return;
 
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current);
     }
 
-    // Reset effects flag on every settings change (during drag)
+    // Reset effects flag on every settings change; the idle timer below
+    // re-enables them once the user stops moving.
     renderEffectsRef.current = false;
-
-    // While a slider is being dragged, run a recurring throttled regen so
-    // the canvas tracks the cursor. The regen runs with effects disabled
-    // (blur/noise are too expensive to render per-pixel; they're added
-    // back after the drag settles). Uses a recursive setTimeout — not
-    // setInterval — so a slow regen never queues up overlapping renders.
-    if (useEditorStore.getState()._isDragging) {
-      isDraggingRef.current = true;
-      if (!dragRegenTimerRef.current) {
-        const regenLoop = () => {
-          if (pendingSettingsRef.current) {
-            generatePreview(pendingSettingsRef.current);
-          }
-          if (useEditorStore.getState()._isDragging) {
-            dragRegenTimerRef.current = setTimeout(regenLoop, DRAG_THROTTLE_MS);
-          } else {
-            dragRegenTimerRef.current = null;
-          }
-        };
-        regenLoop();
-      }
-      return;
-    }
-    isDraggingRef.current = false;
-    // Drag ended — cancel the recurring throttled regen.
-    if (dragRegenTimerRef.current) {
-      clearTimeout(dragRegenTimerRef.current);
-      dragRegenTimerRef.current = null;
-    }
 
     // After 200ms of no changes, enable effects and re-render
     if (effectsTimerRef.current) {
       clearTimeout(effectsTimerRef.current);
     }
     effectsTimerRef.current = setTimeout(() => {
+      // A drag may have started after this timer was armed (settings change
+      // → drag start within 200ms). Rendering with effects at full res
+      // mid-drag would jank the gesture; the falling-edge handler renders
+      // the settled frame anyway.
+      if (useEditorStore.getState()._isDragging) return;
       renderEffectsRef.current = true;
       if (pendingSettingsRef.current) {
         generatePreview(pendingSettingsRef.current);
@@ -830,7 +898,6 @@ export function usePreviewGenerator({
     return () => {
       if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
       if (effectsTimerRef.current) clearTimeout(effectsTimerRef.current);
-      if (dragRegenTimerRef.current) clearTimeout(dragRegenTimerRef.current);
     };
   }, [
     screenshotImage,
@@ -874,27 +941,82 @@ export function usePreviewGenerator({
     };
   }, []);
 
-  // Subscribe to the drag flag *only* for the rising edge (drag ended).
-  // We use a separate effect so the heavy settings effect above stays cheap
-  // (it doesn't need to re-run every time _isDragging flips).
+  // Drag regen loop — lives in a store subscription on the `_isDragging`
+  // edges, NOT in the settings effect above (that effect's cleanup runs on
+  // every per-pixel settings update and would cancel the loop's timer after
+  // the first drag pixel, freezing the preview until release). While dragging,
+  // the loop regenerates the preview whenever the settings actually changed
+  // (checked every DRAG_THROTTLE_MS), with effects disabled — blur/noise are
+  // too expensive per-pixel and are re-added when the drag settles. It always
+  // calls the latest `generatePreview` through the ref above, so padding and
+  // other settings are never stale, and re-arms on a recursive setTimeout —
+  // not setInterval — so a slow render never queues overlapping renders.
   useEffect(() => {
-    const unsub = useEditorStore.subscribe((state, prev) => {
-      const wasDragging = prev._isDragging;
-      const isDraggingNow = state._isDragging;
-      if (wasDragging && !isDraggingNow) {
-        // Drag just ended — cancel any in-flight throttled regen, then
-        // render the latest pending settings now (with effects enabled,
-        // so blur/noise/contrast show up too).
-        if (dragRegenTimerRef.current) clearTimeout(dragRegenTimerRef.current);
-        renderEffectsRef.current = true;
-        if (pendingSettingsRef.current) {
-          generatePreview(pendingSettingsRef.current);
+    const startRegenLoop = () => {
+      if (dragRegenTimerRef.current) {
+        clearTimeout(dragRegenTimerRef.current);
+        dragRegenTimerRef.current = null;
+      }
+      // Effects (blur/noise) are too heavy to include while tracking the cursor.
+      renderEffectsRef.current = false;
+      // Baseline for the change check — do not re-render the frame the rising
+      // edge itself is about to be rendered for.
+      lastDragRenderKeyRef.current = pendingSettingsRef.current
+        ? JSON.stringify(pendingSettingsRef.current)
+        : null;
+      const regenLoop = () => {
+        if (!useEditorStore.getState()._isDragging) {
+          dragRegenTimerRef.current = null;
+          return;
+        }
+        // Render only when something actually changed. A pointer that is down
+        // but not moving (or a committed slider pause mid-gesture) previously
+        // re-rendered the identical frame every tick — pure wasted main-thread
+        // time competing with the interaction itself.
+        const pending = pendingSettingsRef.current;
+        if (generatePreviewRef.current && pending) {
+          const key = JSON.stringify(pending);
+          if (key !== lastDragRenderKeyRef.current) {
+            lastDragRenderKeyRef.current = key;
+            generatePreviewRef.current(pending);
+          }
+        }
+        dragRegenTimerRef.current = setTimeout(regenLoop, DRAG_THROTTLE_MS);
+      };
+      regenLoop();
+    };
+
+    const stopRegenLoopAndRender = () => {
+      // Drag just ended — cancel the throttled regen, then render the latest
+      // settings now with effects enabled (blur/noise/contrast show up too).
+      if (dragRegenTimerRef.current) {
+        clearTimeout(dragRegenTimerRef.current);
+        dragRegenTimerRef.current = null;
+      }
+      renderEffectsRef.current = true;
+      if (generatePreviewRef.current && pendingSettingsRef.current) {
+        generatePreviewRef.current(pendingSettingsRef.current);
+      }
+    };
+
+    const unsub = useEditorStore.subscribe(
+      (state) => state._isDragging,
+      (isDragging) => {
+        if (isDragging) {
+          startRegenLoop();
+        } else {
+          stopRegenLoopAndRender();
         }
       }
-      isDraggingRef.current = isDraggingNow;
-    });
-    return unsub;
-  }, [generatePreview]);
+    );
+    return () => {
+      unsub();
+      if (dragRegenTimerRef.current) {
+        clearTimeout(dragRegenTimerRef.current);
+        dragRegenTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // High quality canvas render for save/copy — same pipeline as preview
   const renderHighQualityCanvas = useCallback(
@@ -919,25 +1041,19 @@ export function usePreviewGenerator({
         if (annotations.length > 0) {
           const ctx = canvas.getContext("2d");
           if (ctx) {
-            const MAX_PREVIEW_DIM = 1000;
-            const previewScale = Math.min(1.0, MAX_PREVIEW_DIM / Math.max(canvas.width, canvas.height));
-            const previewWidth = Math.round(canvas.width * previewScale);
-            const exportScaleFactor = canvas.width / previewWidth;
-
+            // Annotations live in the LOGICAL frame space (same space the
+            // editor canvas uses), which is exactly the export canvas size —
+            // so they draw 1:1 with no scaling hack. The blur annotation
+            // drops to device space internally via frameScale = 1.
             ctx.save();
-            if (exportScaleFactor !== 1) {
-              ctx.scale(exportScaleFactor, exportScaleFactor);
-            }
-
             const nonText = annotations.filter((a) => a.type !== "text");
             const textAnns = annotations.filter((a) => a.type === "text");
             nonText.forEach((annotation) => {
-              drawAnnotationOnCanvas(ctx, annotation);
+              drawAnnotationOnCanvas(ctx, annotation, { frameScale: 1, uiScale: 1 });
             });
             textAnns.forEach((annotation) => {
-              drawAnnotationOnCanvas(ctx, annotation);
+              drawAnnotationOnCanvas(ctx, annotation, { frameScale: 1, uiScale: 1 });
             });
-
             ctx.restore();
           }
         }
