@@ -1,6 +1,17 @@
 import { Annotation } from "@/types/annotations";
 
-export function drawAnnotationOnCanvas(ctx: CanvasRenderingContext2D, annotation: Annotation) {
+export interface DrawAnnotationOptions {
+  /** Buffer-px per logical-px of the current preview frame (1 on exports). */
+  frameScale?: number;
+  /** Logical-px per screen-px — scales UI chrome to stay screen-constant. */
+  uiScale?: number;
+}
+
+export function drawAnnotationOnCanvas(
+  ctx: CanvasRenderingContext2D,
+  annotation: Annotation,
+  options?: DrawAnnotationOptions
+) {
   const primaryColor = annotation.fill.hex;
   const primaryOpacity = annotation.fill.opacity / 100;
 
@@ -127,20 +138,29 @@ export function drawAnnotationOnCanvas(ctx: CanvasRenderingContext2D, annotation
       break;
     }
     case "blur": {
-      const x = Math.max(0, Math.floor(annotation.x));
-      const y = Math.max(0, Math.floor(annotation.y));
-      const width = Math.min(Math.ceil(annotation.width), ctx.canvas.width - x);
-      const height = Math.min(Math.ceil(annotation.height), ctx.canvas.height - y);
+      // getImageData/putImageData address DEVICE pixels and ignore the current
+      // transform, so under the logical-frame transform we drop to identity
+      // and convert the rect manually (annotation coords are logical px).
+      const k = options?.frameScale ?? 1;
+      const ui = options?.uiScale ?? 1;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      const x = Math.max(0, Math.floor(annotation.x * k));
+      const y = Math.max(0, Math.floor(annotation.y * k));
+      const width = Math.min(Math.ceil(annotation.width * k), ctx.canvas.width - x);
+      const height = Math.min(Math.ceil(annotation.height * k), ctx.canvas.height - y);
       
       if (width > 0 && height > 0) {
         const imageData = ctx.getImageData(x, y, width, height);
-        const blurAmount = annotation.blurAmount || 20;
+        const blurAmount = Math.max(1, Math.round((annotation.blurAmount || 20) * k));
         const blurredData = applyBoxBlur(imageData, blurAmount);
         ctx.putImageData(blurredData, x, y);
         
+        // Chrome in DEVICE space: screen-constant size is device-per-screen
+        // = frameScale × uiScale.
+        const devUi = k * ui;
         ctx.strokeStyle = "rgba(100, 100, 255, 0.3)";
-        ctx.lineWidth = 2;
-        ctx.setLineDash([5, 5]);
+        ctx.lineWidth = 2 * devUi;
+        ctx.setLineDash([5 * devUi, 5 * devUi]);
         ctx.strokeRect(x, y, width, height);
         ctx.setLineDash([]);
       }

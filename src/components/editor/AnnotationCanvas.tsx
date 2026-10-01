@@ -28,6 +28,13 @@ interface AnnotationCanvasProps {
   selectedAnnotation: Annotation | null;
   selectedTool: ToolType;
   previewUrl: string | null;
+  /**
+   * Logical (full-resolution) size of the composed frame. Display sizing uses
+   * this instead of the rendered buffer size, so the on-screen canvas keeps a
+   * constant size while the preview render tier changes between a drag
+   * (900px) and rest (1400px). Falls back to the buffer size when absent.
+   */
+  frameSize?: { width: number; height: number } | null;
   showTransparencyGrid?: boolean;
   onAnnotationAdd: (annotation: Annotation) => void;
   /** Called on drag end - should commit to history */
@@ -74,6 +81,7 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
   selectedAnnotation,
   selectedTool,
   previewUrl,
+  frameSize,
   showTransparencyGrid = false,
   onAnnotationAdd,
   onAnnotationUpdate,
@@ -106,6 +114,20 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
   
   // Local state for drag operation - minimal React state for rendering triggers
   const [imageLoaded, setImageLoaded] = useState(false);
+
+  // Logical (full-resolution) frame size, from the parent. Annotation
+  // coordinates and display sizing are expressed in THIS space, so the
+  // preview render tier (900px drag frames ↔ 1400px settle frames) is
+  // invisible to geometry: only the buffer resolution changes.
+  const frameSizeRef = useRef<{ width: number; height: number } | null>(null);
+  frameSizeRef.current = frameSize ?? null;
+  // Buffer-px per logical-px for the current frame — set in redraw().
+  const frameScaleRef = useRef(1);
+  // Logical px per SCREEN px (the inverse of the display scale). Annotation
+  // chrome (handles, hit targets, selection outlines) is sized in screen px
+  // and multiplied by this so it stays the same physical size on screen no
+  // matter how large the logical frame is.
+  const uiScaleRef = useRef(1);
 
   // Load image once and cache it
   useEffect(() => {
@@ -142,6 +164,16 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
+    const fs = frameSizeRef.current;
+    // Map straight from display px to LOGICAL frame px — the buffer
+    // resolution cancels out, so clicks land identically whether the current
+    // frame rendered at 900px or 1400px.
+    if (fs && rect.width > 0 && rect.height > 0) {
+      return {
+        x: (e.clientX - rect.left) * (fs.width / rect.width),
+        y: (e.clientY - rect.top) * (fs.height / rect.height),
+      };
+    }
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
     return {
@@ -157,7 +189,11 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
       if (!type || type === "select") return null;
 
       const defaultColor = { hex: "#FF3300", opacity: 100 };
-      const defaultBorder = { width: 5, color: { hex: "#FF3300", opacity: 100 } };
+      // Default geometry is in LOGICAL frame px now — scale by uiScale so a
+      // new annotation has the same visual size on a 4000px frame as on a
+      // 1000px one (previously defaults lived in ~1400px preview space).
+      const ui = Math.max(1, uiScaleRef.current);
+      const defaultBorder = { width: 5 * ui, color: { hex: "#FF3300", opacity: 100 } };
       const defaultAlignment = { horizontal: "left" as const, vertical: "top" as const };
       const currentNum = dragStateRef.current.nextNumber;
 
@@ -224,10 +260,10 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
             x: start.x,
             y: start.y,
             text: "Text",
-            fontSize: 48,
+            fontSize: 48 * ui,
             fontFamily: "Arial",
-            width: 200,
-            height: 60,
+            width: 200 * ui,
+            height: 60 * ui,
             fill: defaultColor,
             border: defaultBorder,
             alignment: defaultAlignment,
@@ -240,7 +276,7 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
             x: start.x,
             y: start.y,
             number: currentNum,
-            radius: 32,
+            radius: 32 * ui,
             fill: defaultColor,
             border: defaultBorder,
             alignment: defaultAlignment,
@@ -350,7 +386,7 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
   const isPointOnHandle = useCallback((point: Point, handle: { x: number; y: number }, annotation?: Annotation): boolean => {
     const distance = Math.sqrt(Math.pow(point.x - handle.x, 2) + Math.pow(point.y - handle.y, 2));
     const isLineOrArrow = annotation && (annotation.type === "line" || annotation.type === "arrow");
-    const hitSize = isLineOrArrow ? LINE_HANDLE_HIT_SIZE : HANDLE_HIT_SIZE;
+    const hitSize = (isLineOrArrow ? LINE_HANDLE_HIT_SIZE : HANDLE_HIT_SIZE) * uiScaleRef.current;
     return distance <= hitSize / 2;
   }, []);
 
@@ -365,7 +401,8 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
   }, [getResizeHandles, isPointOnHandle]);
 
   const isPointInAnnotation = useCallback((point: Point, annotation: Annotation): boolean => {
-    const margin = 20;
+    const ui = uiScaleRef.current;
+    const margin = 20 * ui;
     switch (annotation.type) {
       case "circle": {
         const distance = Math.sqrt(
@@ -384,7 +421,7 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
       case "line":
       case "arrow": {
         const lineWidth = annotation.border?.width || 5;
-        const hitTolerance = Math.max(35, lineWidth + 25);
+        const hitTolerance = Math.max(35 * ui, lineWidth + 25 * ui);
         
         if (annotation.lineType === "curved" && annotation.controlPoints && annotation.controlPoints.length > 0) {
           const cp = annotation.controlPoints[0];
@@ -442,7 +479,7 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
         }
         const lineCount = lines.length || 1;
         const totalHeight = Math.max(annotation.height || 60, lineCount * annotation.fontSize * 1.2);
-        const padding = 20;
+        const padding = 20 * ui;
 
         return (
           point.x >= annotation.x - padding &&
@@ -480,8 +517,8 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
         annotation.controlPoints.length > 0) {
       const cp = annotation.controlPoints[0];
       ctx.strokeStyle = "rgba(59, 130, 246, 0.3)";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([3, 3]);
+      ctx.lineWidth = 1 * uiScaleRef.current;
+      ctx.setLineDash([3 * uiScaleRef.current, 3 * uiScaleRef.current]);
       ctx.beginPath();
       ctx.moveTo(annotation.x, annotation.y);
       ctx.lineTo(cp.x, cp.y);
@@ -495,8 +532,11 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
       const isActive = activeHandleId === handle.id;
       const isControl = handle.id === "control";
       const isLineOrArrow = annotation.type === "line" || annotation.type === "arrow";
-      const baseSize = isLineOrArrow ? LINE_HANDLE_SIZE : HANDLE_SIZE;
-      const hoverSize = isLineOrArrow ? LINE_HANDLE_SIZE + 4 : HANDLE_HOVER_SIZE;
+      // Handle sizes are in SCREEN px — scaled by uiScale so they stay the
+      // same physical size on screen no matter the logical frame resolution.
+      const ui = uiScaleRef.current;
+      const baseSize = (isLineOrArrow ? LINE_HANDLE_SIZE : HANDLE_SIZE) * ui;
+      const hoverSize = (isLineOrArrow ? LINE_HANDLE_SIZE + 4 : HANDLE_HOVER_SIZE) * ui;
       const size = (isHovered || isActive) ? hoverSize : baseSize;
       const fillColor = isControl ? "#10b981" : (isActive ? "#2563eb" : "#3b82f6");
       
@@ -504,7 +544,7 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
       
       if (isHovered || isActive) {
         ctx.shadowColor = "rgba(59, 130, 246, 0.6)";
-        ctx.shadowBlur = isActive ? 12 : 8;
+        ctx.shadowBlur = (isActive ? 12 : 8) * ui;
       } else {
         ctx.shadowColor = "transparent";
         ctx.shadowBlur = 0;
@@ -512,12 +552,12 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
       
       ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
       ctx.beginPath();
-      ctx.arc(handle.x, handle.y, size / 2 + 2, 0, Math.PI * 2);
+      ctx.arc(handle.x, handle.y, size / 2 + 2 * ui, 0, Math.PI * 2);
       ctx.fill();
       
       ctx.fillStyle = fillColor;
       ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = (isHovered || isActive) ? 3.5 : 2.5;
+      ctx.lineWidth = ((isHovered || isActive) ? 3.5 : 2.5) * ui;
       
       ctx.beginPath();
       ctx.arc(handle.x, handle.y, size / 2, 0, Math.PI * 2);
@@ -528,9 +568,9 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
         ctx.shadowColor = "transparent";
         ctx.shadowBlur = 0;
         ctx.strokeStyle = isActive ? "rgba(37, 99, 235, 0.6)" : "rgba(59, 130, 246, 0.5)";
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2 * ui;
         ctx.beginPath();
-        ctx.arc(handle.x, handle.y, size / 2 + 6, 0, Math.PI * 2);
+        ctx.arc(handle.x, handle.y, size / 2 + 6 * ui, 0, Math.PI * 2);
         ctx.stroke();
       }
       
@@ -542,23 +582,29 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
 
   const drawAnnotation = useCallback(
     (ctx: CanvasRenderingContext2D, annotation: Annotation, isSelected: boolean) => {
-      drawAnnotationOnCanvas(ctx, annotation);
+      drawAnnotationOnCanvas(ctx, annotation, {
+        frameScale: frameScaleRef.current,
+        uiScale: uiScaleRef.current,
+      });
 
       if (isSelected && annotation.type !== "blur") {
+        // Selection chrome is sized in SCREEN px (scaled by uiScale) so it
+        // stays the same visual size on any logical frame size.
+        const ui = uiScaleRef.current;
         ctx.save();
         ctx.strokeStyle = "#3b82f6";
-        ctx.lineWidth = 2;
-        ctx.setLineDash([5, 5]);
+        ctx.lineWidth = 2 * ui;
+        ctx.setLineDash([5 * ui, 5 * ui]);
         
         switch (annotation.type) {
           case "circle": {
             ctx.beginPath();
-            ctx.arc(annotation.x, annotation.y, annotation.radius + 5, 0, Math.PI * 2);
+            ctx.arc(annotation.x, annotation.y, annotation.radius + 5 * ui, 0, Math.PI * 2);
             ctx.stroke();
             break;
           }
           case "rectangle": {
-            ctx.strokeRect(annotation.x - 5, annotation.y - 5, annotation.width + 10, annotation.height + 10);
+            ctx.strokeRect(annotation.x - 5 * ui, annotation.y - 5 * ui, annotation.width + 10 * ui, annotation.height + 10 * ui);
             break;
           }
           case "line":
@@ -576,7 +622,7 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
               maxY = Math.max(maxY, cp.y);
             }
             
-            const padding = 8;
+            const padding = 8 * ui;
             ctx.strokeRect(
               minX - padding,
               minY - padding,
@@ -606,12 +652,12 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
             const lineCount = lines.length || 1;
             const totalHeight = Math.max(annotation.height || 60, lineCount * annotation.fontSize * 1.2);
 
-            ctx.strokeRect(annotation.x - 5, annotation.y - 5, maxLineWidth + 10, totalHeight + 10);
+            ctx.strokeRect(annotation.x - 5 * ui, annotation.y - 5 * ui, maxLineWidth + 10 * ui, totalHeight + 10 * ui);
             break;
           }
           case "number": {
             ctx.beginPath();
-            ctx.arc(annotation.x, annotation.y, annotation.radius + 5, 0, Math.PI * 2);
+            ctx.arc(annotation.x, annotation.y, annotation.radius + 5 * ui, 0, Math.PI * 2);
             ctx.stroke();
             break;
           }
@@ -639,29 +685,46 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
       canvas.width = img.width;
       canvas.height = img.height;
     }
-    
+
+    // Display size from the LOGICAL frame size when available — constant
+    // across preview render tiers. Fallback: the rendered buffer size
+    // (previous behavior) when frameSize is not supplied.
+    const fs = frameSizeRef.current;
+    const logicalW = fs ? fs.width : img.width;
+    const logicalH = fs ? fs.height : img.height;
+
     const containerRect = container.getBoundingClientRect();
     const containerWidth = containerRect.width;
     const containerHeight = containerRect.height;
-    const imgAspect = img.width / img.height;
+    const imgAspect = logicalW / logicalH;
     const containerAspect = containerWidth / containerHeight;
 
     let displayWidth: number;
     let displayHeight: number;
 
     if (imgAspect > containerAspect) {
-      displayWidth = Math.min(containerWidth, img.width);
+      displayWidth = Math.min(containerWidth, logicalW);
       displayHeight = displayWidth / imgAspect;
     } else {
-      displayHeight = Math.min(containerHeight, img.height);
+      displayHeight = Math.min(containerHeight, logicalH);
       displayWidth = displayHeight * imgAspect;
     }
 
     canvas.style.width = `${displayWidth}px`;
     canvas.style.height = `${displayHeight}px`;
-    
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    // Buffer-px per logical-px. Annotations live in logical space; this maps
+    // them into whatever resolution the current frame rendered at.
+    const frameScale = canvas.width / logicalW;
+    frameScaleRef.current = frameScale;
+    // Logical px per screen px — keeps annotation chrome (handles, hit
+    // targets, selection outlines) a constant size on screen regardless of
+    // how large the logical frame is.
+    uiScaleRef.current = displayWidth > 0 ? logicalW / displayWidth : 1;
+
+    ctx.setTransform(frameScale, 0, 0, frameScale, 0, 0);
+    ctx.clearRect(0, 0, logicalW, logicalH);
+    ctx.drawImage(img, 0, 0, logicalW, logicalH);
 
     const currentAnnotations = annotationsRef.current;
     // Render non-text annotations first

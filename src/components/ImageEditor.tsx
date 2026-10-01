@@ -11,7 +11,12 @@ import { AnnotationToolbar } from "./editor/AnnotationToolbar";
 import { AnnotationCanvas } from "./editor/AnnotationCanvas";
 import { RightSidebar } from "./editor/RightSidebar";
 import { Annotation, ToolType } from "@/types/annotations";
-import { usePreviewGenerator } from "@/hooks/usePreviewGenerator";
+import { usePreviewGenerator, getFrameDimensions } from "@/hooks/usePreviewGenerator";
+import {
+  buildFilenameFromTemplate,
+  canvasToDataUrl,
+  loadExportPrefs,
+} from "@/lib/export-settings";
 import {
   useEditorStore,
   useBackgroundType,
@@ -52,7 +57,8 @@ import type { EditorSettings } from "@/stores/editorStore";
 
 interface ImageEditorProps {
   imagePath: string;
-  onSave: (editedImageData: string) => void;
+  /** `filename` is the user's template-resolved base name (no extension). */
+  onSave: (editedImageData: string, filename?: string) => void;
   onCancel: () => void;
 }
 
@@ -181,6 +187,34 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
 
   const error = loadError || previewError;
 
+  // Logical (full-resolution) frame size — what the composed image measures
+  // BEFORE preview-tier scaling. Passed to AnnotationCanvas so the on-screen
+  // canvas keeps a constant size across the 900px-drag ↔ 1400px-rest preview
+  // tiers, and so annotation coordinates stay in one stable space.
+  const frameDimensions = useMemo(
+    () =>
+      screenshotImage
+        ? getFrameDimensions(screenshotImage, settings, {
+            top: paddingTop,
+            bottom: paddingBottom,
+            left: paddingLeft,
+            right: paddingRight,
+          })
+        : null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `settings` is rebuilt every render; the primitive fields below are exactly the inputs getFrameDimensions reads (imageScale, layoutPreset, frameStyle, framePadding + the padding values passed explicitly).
+    [
+      screenshotImage,
+      settings.imageScale,
+      settings.layoutPreset,
+      settings.frameStyle,
+      settings.framePadding,
+      paddingTop,
+      paddingBottom,
+      paddingLeft,
+      paddingRight,
+    ]
+  );
+
   useEffect(() => {
     editorActions.initialize();
   }, []);
@@ -285,28 +319,15 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
         return;
       }
 
-      highQualityCanvas.toBlob(
-        (blob) => {
-          if (blob) {
-            const reader = new FileReader();
-            reader.onloadend = () => {
-              onSave(reader.result as string);
-              setIsSaving(false);
-            };
-            reader.onerror = () => {
-              reportError("Failed to read image data");
-              setIsSaving(false);
-            };
-            reader.readAsDataURL(blob);
-          } else {
-            setIsSaving(false);
-          }
-        },
-        "image/png",
-        1.0
-      );
+      // Format/quality/filename come from the user's export preferences
+      // (settings.json). The encoder's actual mime wins — WebKitGTK may fall
+      // back to PNG for a requested type it cannot encode.
+      const prefs = await loadExportPrefs();
+      const { dataUrl } = await canvasToDataUrl(highQualityCanvas, prefs);
+      onSave(dataUrl, buildFilenameFromTemplate(prefs.filenameTemplate));
     } catch (err) {
       reportError(`Failed to save: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
       setIsSaving(false);
     }
   }, [screenshotImage, annotations, renderHighQualityCanvas, onSave, isSaving, isCopying, imagePath, reportError]);
@@ -487,6 +508,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
                   selectedAnnotation={selectedAnnotation}
                   selectedTool={selectedTool}
                   previewUrl={previewUrl}
+                  frameSize={frameDimensions}
                   showTransparencyGrid={settings.backgroundType === "transparent"}
                   onAnnotationAdd={handleAnnotationAdd}
                   onAnnotationUpdate={handleAnnotationUpdate}
