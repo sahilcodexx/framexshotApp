@@ -1,15 +1,17 @@
 import { useState, useEffect, useCallback } from "react";
 import { Store } from "@tauri-apps/plugin-store";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowLeft, Folder, FolderOpen, Sliders, Image as ImageIcon, Keyboard, Info, Loader2, Check, Sparkles, Moon, Sun } from "lucide-react";
+import { ArrowLeft, FileText, Folder, FolderOpen, Sliders, Image as ImageIcon, Keyboard, Info, Loader2, Check, Sparkles, Moon, Sun } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
+import { RangeSliderDebounced } from "@/components/motion/range-slider-debounced";
 import { BackgroundImageSelector } from "./BackgroundImageSelector";
 import { KeyboardShortcutManager } from "./KeyboardShortcutManager";
 import type { KeyboardShortcut } from "./KeyboardShortcutManager";
 import { useTheme } from "@/hooks/useTheme";
+import { buildFilenameFromTemplate, DEFAULT_FILENAME_TEMPLATE, type SaveFormat } from "@/lib/export-settings";
 import { cn } from "@/lib/utils";
 
 interface PreferencesPageProps {
@@ -20,16 +22,28 @@ interface PreferencesPageProps {
 interface GeneralSettings {
   saveDir: string;
   copyToClipboard: boolean;
+  saveFormat: SaveFormat;
+  saveQuality: number;
+  filenameTemplate: string;
 }
 
 type NavSection = "general" | "background" | "shortcuts" | "about";
+
+// Sample date for the filename-template preview line; module scope keeps the
+// three token samples on the same render consistent.
+const NOW = new Date();
 
 export function PreferencesPage({ onBack, onSettingsChange }: PreferencesPageProps) {
   const [activeNav, setActiveNav] = useState<NavSection>("general");
   const [settings, setSettings] = useState<GeneralSettings>({
     saveDir: "",
     copyToClipboard: true,
+    saveFormat: "png",
+    saveQuality: 90,
+    filenameTemplate: DEFAULT_FILENAME_TEMPLATE,
   });
+  // Draft quality for instant slider feedback; persisted on commit.
+  const [quality, setQuality] = useState(90);
   const [isLoading, setIsLoading] = useState(true);
   const { theme, setTheme } = useTheme();
 
@@ -40,11 +54,25 @@ export function PreferencesPage({ onBack, onSettingsChange }: PreferencesPagePro
         const store = await Store.load("settings.json");
         const copyToClip = await store.get<boolean>("copyToClipboard");
         const saveDir = await store.get<string>("saveDir");
+        const saveFormat = await store.get<SaveFormat>("saveFormat");
+        const saveQuality = await store.get<number>("saveQuality");
+        const filenameTemplate = await store.get<string>("filenameTemplate");
 
         setSettings({
           saveDir: saveDir || "",
           copyToClipboard: copyToClip ?? true,
+          saveFormat: saveFormat === "jpeg" || saveFormat === "webp" ? saveFormat : "png",
+          saveQuality:
+            typeof saveQuality === "number" && saveQuality >= 1 && saveQuality <= 100
+              ? Math.round(saveQuality)
+              : 90,
+          filenameTemplate: filenameTemplate?.trim() ? filenameTemplate : DEFAULT_FILENAME_TEMPLATE,
         });
+        setQuality(
+          typeof saveQuality === "number" && saveQuality >= 1 && saveQuality <= 100
+            ? Math.round(saveQuality)
+            : 90
+        );
       } catch (err) {
         console.error("Failed to load settings:", err);
       } finally {
@@ -235,6 +263,80 @@ export function PreferencesPage({ onBack, onSettingsChange }: PreferencesPagePro
                   </div>
                   <p className="text-[11px] text-muted-foreground">
                     Captured screenshots will automatically save to this directory location.
+                  </p>
+                </div>
+
+                {/* Export Format */}
+                <div className="flex items-center justify-between py-2 border-t border-border/30 pt-4">
+                  <div className="space-y-0.5">
+                    <p className="text-xs font-medium text-foreground">Export format</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      Clipboard copies always use PNG for maximum compatibility
+                    </p>
+                  </div>
+                  <div className="inline-flex items-center gap-1 rounded-full border border-border bg-secondary/60 p-1">
+                    {(["png", "jpeg", "webp"] as SaveFormat[]).map((fmt) => (
+                      <button
+                        key={fmt}
+                        type="button"
+                        onClick={() => updateSetting("saveFormat", fmt)}
+                        aria-pressed={settings.saveFormat === fmt}
+                        className={cn(
+                          "rounded-full px-3 py-1 text-[11px] font-medium uppercase transition-colors",
+                          settings.saveFormat === fmt
+                            ? "bg-foreground text-background"
+                            : "text-muted-foreground hover:text-foreground"
+                        )}
+                      >
+                        {fmt}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Quality (lossy formats only) */}
+                {settings.saveFormat !== "png" && (
+                  <div className="py-2 border-t border-border/30 pt-4">
+                    <RangeSliderDebounced
+                      label="Quality"
+                      value={quality}
+                      min={1}
+                      max={100}
+                      step={1}
+                      showTicks={false}
+                      format={(v) => `${v}%`}
+                      onValueChangeTransient={(v) => setQuality(v)}
+                      onValueCommit={(v) => updateSetting("saveQuality", v)}
+                      aria-label="Export quality"
+                    />
+                  </div>
+                )}
+
+                {/* Filename Template */}
+                <div className="space-y-2 py-2 border-t border-border/30 pt-4">
+                  <label
+                    htmlFor="filename-template"
+                    className="text-xs font-medium text-foreground flex items-center gap-2"
+                  >
+                    <FileText className="size-3.5 text-muted-foreground" aria-hidden="true" />
+                    Filename template
+                  </label>
+                  <input
+                    id="filename-template"
+                    type="text"
+                    value={settings.filenameTemplate}
+                    onChange={(e) => setSettings((prev) => ({ ...prev, filenameTemplate: e.target.value }))}
+                    onBlur={(e) => {
+                      const v = e.target.value.trim() || DEFAULT_FILENAME_TEMPLATE;
+                      updateSetting("filenameTemplate", v);
+                    }}
+                    placeholder={DEFAULT_FILENAME_TEMPLATE}
+                    className="w-full px-3 py-2 bg-secondary border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-accent font-mono text-xs transition-colors"
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Tokens: <code className="font-mono text-foreground/80">%date</code> → {buildFilenameFromTemplate("%date", NOW)} · <code className="font-mono text-foreground/80">%time</code> → {buildFilenameFromTemplate("%time", NOW)}
+                    <br />
+                    Preview: <span className="font-mono text-foreground/80">{buildFilenameFromTemplate(settings.filenameTemplate, NOW)}.png</span>
                   </p>
                 </div>
 

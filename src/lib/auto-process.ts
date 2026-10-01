@@ -6,6 +6,7 @@ import {
   renderFullCanvas,
 } from "@/hooks/usePreviewGenerator";
 import { resolveBackgroundPath, getDefaultBackgroundPath } from "./asset-registry";
+import { loadExportPrefs, mimeForFormat } from "./export-settings";
 import { gradientOptions } from "@/components/editor/BackgroundSelector";
 import {
   type BackgroundType,
@@ -126,6 +127,11 @@ export async function processScreenshotWithDefaultBackground(
     bgImage
   );
 
+  // Respect the user's export format/quality (settings.json). The Rust saver
+  // derives the file extension from the mime prefix of the data URL.
+  const prefs = await loadExportPrefs();
+  const mime = mimeForFormat(prefs.format);
+
   return new Promise((resolve, reject) => {
     canvas.toBlob(
       (blob) => {
@@ -142,8 +148,8 @@ export async function processScreenshotWithDefaultBackground(
           reject(new Error("Failed to create blob from canvas"));
         }
       },
-      "image/jpeg",
-      0.9
+      mime,
+      prefs.format === "png" ? undefined : prefs.quality / 100
     );
   });
 }

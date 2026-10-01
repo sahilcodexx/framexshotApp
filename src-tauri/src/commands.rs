@@ -13,7 +13,8 @@ use crate::capture::{capture_fullscreen, capture_window};
 use crate::capture::{capture_region as capture_region_tool, has_binary};
 use crate::clipboard::{copy_image_to_clipboard, copy_text_to_clipboard};
 use crate::image::{
-    copy_screenshot_to_dir, crop_image, render_image_with_effects, save_base64_image, CropRegion,
+    copy_screenshot_to_dir, crop_image, render_image_with_effects, save_base64_image,
+    save_base64_image_named, CropRegion,
     RenderSettings,
 };
 use crate::ocr::recognize_text_from_image;
@@ -112,15 +113,23 @@ pub async fn render_image_with_effects_rust(
         .map_err(|e| format!("Task join error: {}", e))?
 }
 
-/// Save an edited image from base64 data
+/// Save an edited image from base64 data.
+/// `filename` is an optional base name (no extension) from the user's filename
+/// template; when absent a default timestamped name is generated.
 #[tauri::command]
 pub async fn save_edited_image(
     image_data: String,
     save_dir: String,
     copy_to_clip: bool,
+    filename: Option<String>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let saved_path = save_base64_image(&image_data, &save_dir, "framexshot")?;
+        let saved_path = match filename.as_deref() {
+            Some(name) if !name.trim().is_empty() => {
+                save_base64_image_named(&image_data, &save_dir, name)?
+            }
+            _ => save_base64_image(&image_data, &save_dir, "framexshot")?,
+        };
         if copy_to_clip {
             copy_image_to_clipboard(&saved_path)?;
         }

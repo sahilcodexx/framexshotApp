@@ -89,8 +89,9 @@ pub fn save_image(img: &DynamicImage, save_dir: &str, prefix: &str) -> AppResult
     Ok(file_path.to_string_lossy().into_owned())
 }
 
-/// Save base64-encoded image data to a file
-pub fn save_base64_image(image_data: &str, save_dir: &str, prefix: &str) -> AppResult<String> {
+/// Decode a `data:image/…;base64,…` payload into bytes + the file extension
+/// matching the mime type the frontend actually encoded.
+fn decode_base64_image(image_data: &str) -> AppResult<(Vec<u8>, &'static str)> {
     let (base64_data, extension) = if let Some(d) =
         image_data.strip_prefix("data:image/png;base64,")
     {
@@ -99,22 +100,94 @@ pub fn save_base64_image(image_data: &str, save_dir: &str, prefix: &str) -> AppR
         (d, "jpg")
     } else if let Some(d) = image_data.strip_prefix("data:image/jpg;base64,") {
         (d, "jpg")
+    } else if let Some(d) = image_data.strip_prefix("data:image/webp;base64,") {
+        (d, "webp")
     } else {
         return Err(
-            "Invalid image data format: expected data:image/png;base64, or data:image/jpeg;base64, prefix"
+            "Invalid image data format: expected data:image/png;base64, data:image/jpeg;base64, or data:image/webp;base64, prefix"
                 .to_string(),
         );
     };
 
-    let image_bytes = general_purpose::STANDARD
+    let bytes = general_purpose::STANDARD
         .decode(base64_data)
         .map_err(|e| format!("Failed to decode base64: {}", e))?;
+
+    Ok((bytes, extension))
+}
+
+/// Save base64-encoded image data to a file
+pub fn save_base64_image(image_data: &str, save_dir: &str, prefix: &str) -> AppResult<String> {
+    let (image_bytes, extension) = decode_base64_image(image_data)?;
 
     let dest_path = PathBuf::from(save_dir);
     ensure_dir(&dest_path)?;
 
     let filename = generate_filename(prefix, extension)?;
     let file_path = dest_path.join(&filename);
+
+    fs::write(&file_path, image_bytes).map_err(|e| format!("Failed to save image: {}", e))?;
+
+    Ok(file_path.to_string_lossy().into_owned())
+}
+
+/// Known image extensions, used to strip a user-supplied extension before the
+/// real one (from the encoded mime) is appended.
+const IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
+
+/// Strip path separators, reserved characters and control bytes from a
+/// user-supplied filename base. Returns `None` when nothing usable is left.
+fn sanitize_filename_base(name: &str) -> Option<String> {
+    let cleaned: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => ' ',
+            c if (c as u32) < 0x20 => ' ',
+            c => c,
+        })
+        .collect();
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cleaned = cleaned.trim().trim_matches('.').trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+    Some(cleaned.chars().take(120).collect())
+}
+
+/// Save base64-encoded image data under a caller-supplied base filename
+/// (without extension — the real extension is derived from the mime prefix).
+/// Never overwrites: appends `_1`, `_2`, … when the name already exists.
+pub fn save_base64_image_named(
+    image_data: &str,
+    save_dir: &str,
+    filename_base: &str,
+) -> AppResult<String> {
+    let (image_bytes, extension) = decode_base64_image(image_data)?;
+
+    let base = sanitize_filename_base(filename_base)
+        .ok_or_else(|| "Invalid filename".to_string())?;
+    // Drop a trailing extension (matching or not) — the encoded mime wins.
+    let stem = match base.rsplit_once('.') {
+        Some((stem, ext))
+            if IMAGE_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)) =>
+        {
+            stem.to_string()
+        }
+        _ => base,
+    };
+
+    let dest_path = PathBuf::from(save_dir);
+    ensure_dir(&dest_path)?;
+
+    let mut file_path = dest_path.join(format!("{}.{}", stem, extension));
+    let mut counter = 1u32;
+    while file_path.exists() {
+        if counter > 999 {
+            return Err("Too many files with the same name".to_string());
+        }
+        file_path = dest_path.join(format!("{}_{}.{}", stem, counter, extension));
+        counter += 1;
+    }
 
     fs::write(&file_path, image_bytes).map_err(|e| format!("Failed to save image: {}", e))?;
 

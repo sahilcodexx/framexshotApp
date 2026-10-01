@@ -2,6 +2,7 @@ import { editorActions } from "@/stores/editorStore";
 import { Switch } from "@/components/ui/switch";
 import { isAssetId, isDataUrl, migrateStoredValue } from "@/lib/asset-registry";
 import { processScreenshotWithDefaultBackground } from "@/lib/auto-process";
+import { buildExportFilename } from "@/lib/export-settings";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
 import { isMac, isWindows } from "@/lib/platform";
 import { invoke } from "@tauri-apps/api/core";
@@ -491,6 +492,7 @@ function App() {
                 imageData: processedImageData,
                 saveDir: currentSaveDir,
                 copyToClip: shouldCopyToClipboard,
+                filename: await buildExportFilename(),
               });
 
               await appWindow.hide();
@@ -568,6 +570,7 @@ function App() {
             imageData: processedImageData,
             saveDir: currentSaveDir,
             copyToClip: shouldCopyToClipboard,
+            filename: await buildExportFilename(),
           });
 
           await appWindow.hide();
@@ -834,6 +837,7 @@ function App() {
                 imageData: processedImageData,
                 saveDir: currentSaveDir,
                 copyToClip: shouldCopyToClipboard,
+                filename: await buildExportFilename(),
               });
               await getCurrentWindow().hide();
               await showQuickOverlay(savedPath);
@@ -907,12 +911,13 @@ function App() {
     setMode("main");
   }, [loadSettings]);
 
-  async function handleEditorSave(editedImageData: string) {
+  async function handleEditorSave(editedImageData: string, filename?: string) {
     try {
       const savedPath = await invoke<string>("save_edited_image", {
         imageData: editedImageData,
         saveDir,
         copyToClip: copyToClipboard,
+        filename,
       });
 
       toast.success("Image saved", {
