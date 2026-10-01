@@ -486,6 +486,68 @@ EditorStore {
 
 ---
 
+### Change 31: Padding Drag — preview composited at preview resolution + fixed drag regen loop
+- **Files**: `src/hooks/usePreviewGenerator.ts`, `src/lib/frame-presets.ts`
+- **BEFORE**: Two problems made padding changes feel laggy:
+  1. Every preview regen composited at the screenshot's FULL resolution (2+ full-res canvases, full-res `getImageData`/`putImageData` for adjustments) and only downscaled to ≤1400px afterwards — enormous per-tick pixel work.
+  2. The drag regen loop was accidentally dead: the settings effect's cleanup ran on every per-pixel padding update and cleared the loop's timer (ref kept the stale id, so the loop never restarted), and the loop closure captured a stale `generatePreview` (padding from drag start). Net: preview rendered once at drag start, froze, jumped at release.
+- **AFTER**:
+  1. `renderFullCanvas` takes `options.maxDimension` — computes the full-res output size, derives a uniform scale `s = min(1, maxDimension / maxDim)`, then composites the whole frame directly in output space: image draw size, padding, layout extra, frame padding, mockup header (36px → 36·s), traffic lights / window X geometry, border radius, shadow blur/offset, pan offsets all × s. `scaleFrameStyle()` (frame-presets) scales frame chrome (padding/strokes/glow). Blur radius and noise amplitude also × s so the preview matches the downscaled export. Live preview calls it with `maxDimension: 1400`; export/auto-process call without it (full-res, unchanged).
+  2. Drag regen loop moved out of the settings effect into a store subscription on `_isDragging` edges (rising edge starts a recursive 50ms `setTimeout` loop, falling edge stops it and renders once with effects). The loop calls `generatePreviewRef.current` (latest closure via a sync effect) so padding is never stale, and sets `renderEffectsRef = false` at drag start. Unmount clears the loop timer.
+- **Impact**: ~4-8× less pixel work per preview regen; preview tracks the padding slider continuously instead of freezing mid-drag. Canvas size still grows with padding (output = screenshot + padding — required), but each step is now cheap.
+- **REVERT**: remove `maxDimension`/`scaleFrameStyle`, restore full-res render + downscale, move drag loop back into the settings effect with a stale closure
+
+---
+
+### Change 32: Slider Drag Feel — handle tracks cursor 1:1
+- **Files**: `src/lib/hooks/use-slider.ts`, `src/components/motion/range-slider.tsx`, `src/components/motion/range-slider-debounced.tsx`
+- **BEFORE**: The thumb position was derived from the controlled store value, so every pointermove had to round-trip `onValueChange → store write → sidebar re-render` before the handle moved; on the busy editor sidebar that lagged visibly behind the cursor. On top, `useSpring(SPRING_GLIDE)` always chased the target — a spring is always a few frames behind a moving pointer, reading as extra lag. And `RangeSliderDebounced` pushed a transient store write per pointermove (mice poll faster than displays refresh), flooding the sidebar with re-renders.
+- **AFTER**:
+  1. `useSlider` keeps an optimistic `dragValue` state used for rendering while `draggingRef` is true (set in `commit`, cleared in `endDrag`) — the handle follows the cursor immediately; the controlled value catches up alongside for the preview.
+  2. `RangeSlider` renders `pos = dragging ? target : smooth` — raw 1:1 tracking during drag, spring glide only for external jumps (presets, undo), where glide looks right. The spring keeps chasing `target` throughout, so the release handoff is seamless.
+  3. `RangeSliderDebounced` coalesces transient updates to one per animation frame (first change of a gesture fires immediately; subsequent ones overwrite a pending ref flushed on rAF), and sets `_isDragging` true on the first change, false at commit — so at most ~60 store writes/sec instead of one per pointermove.
+- **Impact**: Padding/quality/offset sliders track the cursor exactly; no visible lag between pointer and thumb; sidebar re-renders capped at display refresh rate.
+- **REVERT**: remove `dragValue`, restore `pos = smooth`, remove rAF coalescing
+
+---
+
+### Change 33: Export Options — format, quality, filename template
+- **Files**: `src/lib/export-settings.ts` (NEW), `src/lib/export-settings.test.ts` (NEW), `src-tauri/src/image.rs`, `src-tauri/src/commands.rs`, `src/components/ImageEditor.tsx`, `src/components/preferences/PreferencesPage.tsx`, `src/App.tsx`, `src/lib/auto-process.ts`
+- **BEFORE**: Export was hard-coded PNG (editor `toBlob("image/png")`), filenames were always `framexshot_<timestamp>.png` from Rust `generate_filename`, and the quick-overlay auto-save was hard-coded JPEG 0.9. No user control.
+- **AFTER**:
+  - `export-settings.ts`: `ExportPrefs { format: png|jpeg|webp, quality 1-100, filenameTemplate }` persisted in `settings.json` (`saveFormat`/`saveQuality`/`filenameTemplate`), with `loadExportPrefs()`, `canvasToDataUrl()` (uses `toBlob` with the requested mime + quality; resolves with the mime the encoder ACTUALLY produced, since WebKitGTK silently falls back to PNG for unsupported types), `buildFilenameFromTemplate()` (tokens `%date` → `2026-10-01`, `%time` → `14-30-05`; strips `/\:*?"<>|` + control chars, collapses whitespace, trims dots, caps 120 chars, falls back to `framexshot`), and `buildExportFilename()` (returns `undefined` for the default template so Rust default naming stays).
+  - Rust: `save_base64_image_named(image_data, save_dir, filename_base)` — extension always derived from the mime prefix (webp added to `decode_base64_image`), user extension stripped, never overwrites (appends `_1`…`_999`); `save_edited_image` gained optional `filename: Option<String>`; `sanitize_filename_base` mirrors the frontend sanitization as defense in depth.
+  - Editor `handleSave` uses the user's format/quality/filename. Clipboard copies stay PNG regardless (the copy path encodes PNG itself). Auto-apply/overlay path (`auto-process.ts` + App.tsx `save_edited_image` calls) also uses format/quality + template filename. Editor `onSave` signature is now `(dataUrl, filename?) => void`.
+  - Preferences → General: format pill picker (PNG/JPEG/WEBP), quality slider (lossy only), filename template input with live preview line.
+- **Impact**: Users can save as JPEG/WebP at chosen quality with meaningful names (`%date %time` etc.); defaults preserve the exact old behavior (PNG + `framexshot_<timestamp>`).
+- **Note**: Rust changed → needs `npm run tauri build` (or `cargo tauri dev`) to take effect in the packaged app; plain `npm run dev` picks it up automatically.
+- **REVERT**: delete export-settings.ts(+test), restore hard-coded PNG saves, drop `filename` param and webp arm
+
+---
+
+### Change 34: Drag Frame Budget — cheaper per-frame preview renders
+- **Files**: `src/hooks/usePreviewGenerator.ts`
+- **BEFORE**: Drag frames rendered at the full 1400px preview size, JPEG 0.80, every 50ms, and flipped `isGenerating` twice per frame (two whole-editor host re-renders per drag frame). A pointer held still kept re-rendering the identical frame every tick.
+- **AFTER**: Drag frames render at `DRAG_PREVIEW_DIM` 900px + JPEG 0.72 (cost scales with pixel area — a slightly softer frame that tracks the cursor beats a crisp one that stutters; the settle render restores 1400px + effects ~200ms after release). `isGenerating` flips are skipped while dragging (nothing reads the spinner mid-gesture). Drag cadence 50ms → 34ms (~30fps). The drag loop JSON-keys the pending settings and renders only on change — a held-still pointer costs zero renders. The 200ms effects idle timer bails if a drag started after it was armed (falling edge renders the settled frame anyway).
+- **REVERT**: remove DRAG_PREVIEW_DIM/DRAG_JPEG_QUALITY, restore unconditional isGenerating flips and the 50ms unconditional regen
+
+---
+
+### Change 35: Stable Canvas Size — logical frame space for annotations + display
+- **Files**: `src/hooks/usePreviewGenerator.ts`, `src/components/editor/AnnotationCanvas.tsx`, `src/components/ImageEditor.tsx`, `src/lib/annotation-utils.ts`
+- **BEFORE**: Change 34's two-tier preview (900px drag / 1400px rest) leaked into layout: AnnotationCanvas derived display size and its annotation coordinate space from the rendered buffer (`width:auto` on the buffer size + `canvas.width`-mapped clicks), so the on-screen canvas visibly **shrank when a padding drag started** and grew on release. Annotations also lived in buffer px, so the tier swap would have scaled them.
+- **AFTER**:
+  1. `getFrameDimensions(image, settings, padding)` exported from usePreviewGenerator — the logical (pre-tier) composite size, same math as renderFullCanvas without `maxDimension`.
+  2. ImageEditor computes `frameDimensions` (memoized on the primitive inputs) and passes it as `frameSize` to AnnotationCanvas.
+  3. AnnotationCanvas: display size fits the container by the LOGICAL aspect + size (fallback to buffer size when `frameSize` absent), so the canvas keeps one constant on-screen size across tiers and while padding changes the frame grows in place within the viewport instead of zooming. `getCanvasCoordinates` maps display→logical directly (buffer resolution cancels out).
+  4. Annotations now live in LOGICAL frame px. `redraw()` sets `ctx.setTransform(frameScale, …)` (buffer px per logical px) and all drawing runs in logical space; `frameScaleRef` + `uiScaleRef` (logical px per screen px) drive the rest. `drawAnnotationOnCanvas(ctx, ann, { frameScale, uiScale })`: the blur annotation drops to identity transform (getImageData/putImageData are device-space) converting its rect by `frameScale`, and its blur radius scales by `frameScale` so intensity is resolution-independent.
+  5. UI chrome (resize handles, hit sizes, selection outlines, curved-line guide) scales by `uiScale` — constant physical size on screen for any frame size. New-annotation defaults (border 5, text 48px, number radius 32, blurs/margins) multiply by `uiScale` so they look identical on a 4000px frame and a 1000px frame.
+  6. Export path (`renderHighQualityCanvas`): the old 1000px `exportScaleFactor` scale hack is gone — the export canvas IS the logical frame, so annotations draw 1:1 (`frameScale: 1`). Fixes annotations being drawn ~1.4× too large on export for big captures.
+- **Impact**: Padding changes resize the composed image in place; the canvas viewport never zooms. Drag/settle tier swaps are invisible except for sharpness. Annotation chrome constant on screen. Export annotation scale now correct.
+- **REVERT**: drop `frameSize`/`getFrameDimensions`, restore buffer-derived display size + annotation space and the export scale hack
+
+---
+
 ## CSS Variable Reference (shadcn oklch)
 
 | Tailwind Class    | Light (`:root`) | Dark (`.dark`) | Usage |
