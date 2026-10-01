@@ -35,7 +35,12 @@ export function RangeSlider({ showTicks = true, className, ...options }: RangeSl
     target.set(percent);
   }, [percent, target]);
   const smooth = useSpring(target, SPRING_GLIDE);
-  const pos = reduce ? target : smooth;
+  // While dragging, track the pointer 1:1 — a spring always sits a few frames
+  // behind a moving cursor, which reads as "laggy". The spring stays for
+  // external value changes (preset jumps, undo), where glide looks right.
+  // useSpring keeps chasing target the whole time, so the handoff on release
+  // is seamless.
+  const pos = reduce || dragging ? target : smooth;
   const left = useMotionTemplate`${pos}%`;
   // Self-offset the thumb from 0% (flush left) to -100% (flush right) of its
   // own width so it stays fully inside the track at both ends — no clip, no gap.

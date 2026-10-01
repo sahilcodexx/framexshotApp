@@ -59,6 +59,12 @@ export function useSlider({
   const draggingRef = useRef(false);
   const [internal, setInternal] = useState(defaultValue);
   const [dragging, setDragging] = useState(false);
+  // Optimistic value while dragging. A controlled slider would otherwise move
+  // its handle only after onValueChange → parent store update → re-render
+  // round-trips, which on a busy parent (the editor sidebar) reads as the
+  // handle lagging behind the cursor. During a drag we render THIS value
+  // directly; the controlled value catches up alongside for the preview.
+  const [dragValue, setDragValue] = useState<number | null>(null);
   const controlled = value !== undefined;
   // Collapse inverted or empty ranges and non-positive steps here, so that
   // percent, ticks and the keyboard maths never divide by zero or walk a
@@ -66,13 +72,16 @@ export function useSlider({
   const lo = min;
   const hi = max > min ? max : min;
   const stride = step > 0 ? step : 1;
-  const current = clamp(controlled ? value : internal, lo, hi);
+  const current = clamp(dragValue ?? (controlled ? value : internal), lo, hi);
   const percent = hi > lo ? ((current - lo) / (hi - lo)) * 100 : 0;
 
   const commit = useCallback(
     (next: number) => {
       const clean = snapSliderValue(next, lo, hi, stride);
       if (!controlled) setInternal(clean);
+      // Only while a pointer drag is active (keyboard/programmatic commits go
+      // through the controlled/uncontrolled value as before).
+      if (draggingRef.current) setDragValue(clean);
       onValueChange?.(clean);
     },
     [controlled, onValueChange, lo, hi, stride],
@@ -116,6 +125,9 @@ export function useSlider({
     releasePointer(event.currentTarget, event.pointerId);
     draggingRef.current = false;
     setDragging(false);
+    // Hand position control back to the controlled value. By now the parent
+    // has received the last transient value, so this is visually seamless.
+    setDragValue(null);
   }, []);
 
   const onKeyDown = useCallback(

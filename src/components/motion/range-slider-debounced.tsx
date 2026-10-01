@@ -40,13 +40,34 @@ export function RangeSliderDebounced({
   ...rest
 }: RangeSliderDebouncedProps) {
   const commitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Transient updates are coalesced to at most one per animation frame. A
+  // high-polling mouse fires pointermove far faster than the display refreshes;
+  // each un-coalesced call was a store write → full sidebar re-render, which
+  // starved the main thread and made drags feel heavy. The first change of a
+  // gesture is sent immediately so the preview never waits a frame to start.
+  const rafRef = useRef<number | null>(null);
+  const pendingValueRef = useRef<number | null>(null);
+  const dragActiveRef = useRef(false);
 
   useEffect(
     () => () => {
       if (commitTimerRef.current) clearTimeout(commitTimerRef.current);
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     },
     [],
   );
+
+  const flushPending = () => {
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    if (pendingValueRef.current !== null) {
+      const v = pendingValueRef.current;
+      pendingValueRef.current = null;
+      onValueChangeTransient?.(v);
+    }
+  };
 
   return (
     <div className="space-y-1.5">
@@ -65,10 +86,25 @@ export function RangeSliderDebounced({
       <RangeSlider
         {...rest}
         onValueChange={(v) => {
-          onValueChangeTransient?.(v);
-          onDragChange?.(true);
+          if (!dragActiveRef.current) {
+            dragActiveRef.current = true;
+            onDragChange?.(true);
+            onValueChangeTransient?.(v);
+          } else {
+            pendingValueRef.current = v;
+            if (rafRef.current === null) {
+              rafRef.current = requestAnimationFrame(() => {
+                rafRef.current = null;
+                flushPending();
+              });
+            }
+          }
           if (commitTimerRef.current) clearTimeout(commitTimerRef.current);
           commitTimerRef.current = setTimeout(() => {
+            // Send the final transient (in case a coalesced update is still
+            // pending), then push one history step for the whole gesture.
+            flushPending();
+            dragActiveRef.current = false;
             onValueCommit?.(v);
             onDragChange?.(false);
             commitTimerRef.current = null;
