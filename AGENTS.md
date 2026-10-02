@@ -548,6 +548,85 @@ EditorStore {
 
 ---
 
+### Change 36: Pen + Highlighter annotation tools
+- **Files**: `src/types/annotations.ts`, `src/lib/annotation-utils.ts`, `src/components/editor/AnnotationCanvas.tsx`, `src/components/editor/AnnotationToolbar.tsx`, `src/components/editor/PropertiesPanel.tsx`
+- **BEFORE**: Annotation set had no freehand tool — only circle/rect/line/arrow/text/number/blur.
+- **AFTER**: `PenAnnotation { type: "pen"|"highlighter", points: Point[], strokeWidth }` in logical frame px. Drawing uses quadratic smoothing through segment midpoints (sampled point as control, midpoint as endpoint); highlighter clamps alpha to ≤0.45 and uses square line caps so translucent segment joins don't stack into dark dots, pen uses round caps. Freehand capture: mousedown seeds `penPointsRef`, mousemove samples points ≥2px apart, mouseup commits one annotation (toolbar returns to select). Hit-testing walks the segments with a stroke-scaled tolerance; selection outline is the path's bbox padded by half the stroke; drag translates the whole point list. Defaults (`strokeWidth` 5 pen / 20 highlighter) scale by `uiScale` like other tools. PropertiesPanel gains a Stroke section (Width 2–24 pen / 2–60 highlighter, Opacity 5–100%).
+- **REVERT**: remove PenAnnotation + the two toolbar entries + the stroke section
+
+---
+
+### Change 37: Export scale (0.5× / 1× / 2×)
+- **Files**: `src/lib/export-settings.ts`, `src/hooks/usePreviewGenerator.ts`, `src/components/ImageEditor.tsx`, `src/components/preferences/PreferencesPage.tsx`
+- **BEFORE**: Exports were always 1:1 with the composed frame — retina captures produced huge files, and there was no way to ship a smaller or 2× image.
+- **AFTER**: `ExportPrefs.scale` (0.5/1/2, persisted as `saveScale`) with `EXPORT_SCALES` const; `renderFullCanvas` gains `options.outputScale` applied by `maybeScaleOutput()` AFTER all compositing (internal geometry never knows about it), and `renderHighQualityCanvas(annotations, imagePath, { outputScale })` draws annotations under `ctx.scale(outputScale)` with `frameScale: outputScale` so blur stays correct at any scale. Editor Export renders at the pref; Copy stays 1× PNG. Preferences gains a 0.5×/1×/2× pill group under Export format.
+- **REVERT**: remove `saveScale`/`EXPORT_SCALES`/`maybeScaleOutput`/`outputScale` plumbing
+
+---
+
+### Change 38: Tick dots off + capture delay on the home page
+- **Files**: `src/components/motion/range-slider.tsx`, `src/App.tsx`
+- **BEFORE**: `RangeSlider` rendered step tick dots whenever the range had ≤50 steps, so short-range sliders (Blur 0–50, Padding 0–400 by 5, Corner 0–50) showed dots while 0–100 sliders (Noise, Opacity) showed none — inconsistent by accident, and the dots fought the fill bar. No way to delay a capture, so dropdown menus/tooltips closed before the shutter fired.
+- **AFTER**: `showTicks` now defaults to `false` (still opt-in via the prop; Preferences quality slider already passed it explicitly). New `captureDelay` state (0/3/5/10s, persisted as `captureDelay` in settings.json, loaded in both `loadSettings` and the init effect) with a pill stepper on the home page under the capture-mode grid. `handleCapture` reads it from `settingsRef` and, when the capture came from the UI (`activeCaptureSourceRef`), waits after `hide()` ticking a visible countdown badge; hotkeys bypass the delay deliberately (a 5s hang after a hotkey would read as the app freezing). Countdown resets in the `finally` alongside `isCapturing`.
+- **REVERT**: restore `showTicks = true`, remove the delay state/stepper/countdown
+
+---
+
+### Change 39: Launch at login — opt-in toggle + start-hidden-to-tray
+- **Files**: `src-tauri/src/utils.rs`, `src-tauri/src/commands.rs`, `src-tauri/src/lib.rs`, `src/lib/autostart.ts` (NEW), `src/components/preferences/PreferencesPage.tsx`
+- **BEFORE**: `setup()` silently force-enabled autostart on every launch — `if !autolaunch().is_enabled() { enable() }` — registering FrameXShot with the OS behind the user's back with no UI anywhere to turn it off. There was also no way to choose whether a login launch opened the window: the registration always carried `--hidden`, and `--hidden` unconditionally decided `visible(false)`.
+- **AFTER**:
+  - **Force-enable removed.** Launch at login is opt-in, driven only from Settings → General.
+  - **`utils.rs`**: `AutostartPrefs { start_hidden }` + `read_autostart_prefs` / `write_autostart_prefs` over `<app_config_dir>/autostart.json`. Deliberately its own file, not `settings.json` — the decision is read in `setup()` *before* the webview that owns the store has mounted. A missing file, malformed JSON, or unreadable dir all resolve to `start_hidden = true` (never an error): this runs on every launch, and failing to start because a prefs file is corrupt is far worse than showing the window.
+  - **`Default` is hand-written, not derived.** `#[derive(Default)]` would zero `start_hidden` to `false`, silently overriding the `#[serde(default = "default_true")]` and turning "no prefs file" into "show the window at login". Covered by 4 tests (default, round-trip, corrupt file, missing key).
+  - **`commands.rs`**: `get_autostart_state` / `set_autostart(enabled, start_hidden)` returning `AutostartState { enabled, start_hidden }`. `enabled` is read back from the OS after every write rather than echoing the request, so a desktop that refuses the registration snaps the toggle back instead of lying. `start_hidden` is persisted even while `enabled` is false, so toggling off and back on restores the previous choice.
+  - **`lib.rs`**: `is_hidden = launched_hidden && start_hidden_on_login`. The plugin bakes its args in at `init()` and exposes no `update_args`, so `--hidden` is always in the registration — this flag is what makes it mean something.
+  - **Preferences**: a `Startup` card (Power icon) under General with "Launch at login" and "Start hidden to tray" switches. `Start hidden` is dimmed and disabled while launch-at-login is off. If the platform won't report the state (locked-down desktop), both switches disable and the copy says "Unavailable" rather than showing a confident "off".
+- **Impact**: Launch-at-login is now visible, reversible and configurable. Also fixes a consent bug — the app was registering itself as a startup app whether or not the user wanted it.
+- **Note**: Rust changed → needs `npm run tauri build` (or `cargo tauri dev`) to take effect in the packaged app.
+- **REVERT**: restore the force-enable block in `setup()`, drop the two commands + Startup card + `autostart.ts`, revert `is_hidden = launched_hidden`
+
+---
+
+### Change 40: Crop tool (DESTRUCTIVE — rewrites the source image)
+- **Files**: `src/lib/crop-selection.ts` (NEW) + `.test.ts` (NEW), `src/hooks/usePreviewGenerator.ts`, `src/types/annotations.ts`, `src/stores/editorStore.ts`, `src/stores/index.ts`, `src/components/editor/AnnotationToolbar.tsx`, `src/components/editor/AnnotationCanvas.tsx`, `src/components/ImageEditor.tsx`
+- **Flow**: pick the Crop tool → drag a selection over the screenshot → a **Crop button appears in the bottom bar** next to Cancel/Copy/Export → click it → the unselected pixels are **deleted from the source image**. The screenshot itself becomes the crop, and the frame, canvas, background, padding and every effect recompute around the smaller image. Confirmed with an explicit dialog stating it cannot be undone.
+- **NOT a viewport.** The first attempt stored the crop as a view window into the composed frame (`renderFullCanvas` sampled it at the end; annotations were translated by `-crop.x/-crop.y`; the preview rendered *uncropped* while the tool was active). That was wrong: it hid the unselected part instead of deleting it, left the original pixels intact, and never resized anything. All of it is reverted — `applyCrop`, the `ignoreCrop` option, the export-path annotation translate and the crop-aware `getFrameDimensions` are gone. `crop` is no longer an `EditorSettings` field; there is no persistent crop state to reset.
+- **How destructiveness is achieved**: the cropped canvas is encoded to a PNG data URL and becomes a local `sourcePath` shadow (`croppedImagePath ?? imagePath`). `imagePath` is a prop owned by App.tsx — Cancel must still discard the editor and return to the *untouched* capture — so the swap is local to ImageEditor. Because the load effect keys off the source path, every derived value follows automatically; nothing about the background or frame needed special-casing.
+- **Coordinate mapping**: the selection is defined on the SOURCE IMAGE and stored in source px; the canvas draws in logical frame space. `getImageContentRect()` (in usePreviewGenerator) is the single source of truth for where the image sits in the frame — layout inset, frame padding, pan offset, and the **36px mockup header**, which is drawn *inside* the framed layer above the image and would otherwise shift every selection up by 36px whenever a window frame is on. The same helper is called with the CROPPED dimensions to predict where the new image will land, so renderer and crop logic cannot drift apart.
+- **Annotations survive the crop** (`rebaseAnnotationsForCrop`, 17 tests): each is translated by the same delta the image origin moved, and any that fell entirely outside the surviving pixels is dropped. Partially-visible annotations are kept — freehand bounds are grown by half the stroke so a stroke that merely grazes the new edge isn't silently deleted. History is only pushed when something is actually dropped.
+- **Interaction**: drag to draw, drag from inside the selection to move it (size preserved, kept inside the image), rule-of-thirds guides, corner brackets. The selection is hard-clamped to the screenshot's rect — cropping into the padding or background would delete pixels the source doesn't contain — and that rect is outlined with a dashed stroke so the actionable area is visible rather than discovered by dragging. Canvas re-renders from drag refs, never React state.
+- **Undo after crop** (added after the first cut): the source image became part of undo/redo. `HistorySnapshot` gained `sourceIndex` and the store an `EditorState.sourceIndex`; `undo`/`redo` restore it alongside settings and annotations, so **one Ctrl+Z brings back both the un-cropped image and the annotations that belonged to it**. The images themselves live in ImageEditor as `sourcesByCapture` (index 0 = original, each crop appends), because copying a multi-megabyte data URL into 50 snapshots would be a memory leak — the store only holds the index. Keyed by capture rather than reset, so no reset effect is needed and the editor's keep-mounted behaviour (Change 13) can't leak a cropped image into the next capture; a stale index from a previous capture simply misses the shorter list and falls back to the original. Last 3 captures retained (`MAX_SOURCE_CAPTURES`). `setSourceIndex` clears `future` — redo snapshots describe images the user has since diverged from.
+- **Crop pushes exactly ONE history entry.** `setAnnotations` pushes its own snapshot, so crop calls `pushHistory()` first (capturing the pre-crop index + annotations) and wraps `setAnnotations` in `pauseHistory`/`resumeHistory`. Without this, one Ctrl+Z landed mid-crop — annotations restored, image still cropped. Caught by a test.
+- **Crop fixes after first-cut testing** (3 bugs, all reported from screenshots):
+  1. **Index 0 must always be the ORIGINAL.** Crops were appended starting at index 0, so after the first crop `sourceIndex` was 0 both before and after — undo restored the same index, resolved to the same cropped image, and looked like undo was simply dead. Extracted `resolveSourcePath(crops, index, original)` with index 0 = original, index N = `crops[N-1]`; 6 tests. Crop now sets `(list.length ?? 0) + 1`.
+  2. **Tool/selection reset after applying was silently deleted** by a bad edit, leaving Crop active and the bottom-bar Crop button showing with nothing to apply. Restored. (Lesson: several of these bugs came from hand-rolled python slice-and-replace on a 700-line file eating surrounding lines — verified with `tsc` each time, but the deletion was only caught later by re-reading the function.)
+  3. **No full-frame dim when there is no selection.** Dimming everything on tool activation reads as a greyed-out/broken image rather than "drag to select". Now only the dashed croppable-bounds outline shows until a selection exists.
+- **Confirm copy corrected** to "You can undo this with ⌘Z" now that undo actually works.
+- **Crop drag is frame-coalesced.** `redraw()` re-blits the full-resolution screenshot, so calling it straight from `pointermove` queued one full composite per event; mice poll at 125–1000Hz against a 60Hz display, and the overlay visibly trailed the cursor. Now coalesced to one `requestAnimationFrame` (same treatment as Change 34's drag loop), which is what made moving an existing selection feel laggy.
+- **REVERT**: delete `crop-selection.ts`(+test) + `getImageContentRect`, remove the Crop toolbar entry, `handleCropSelect`/`handleApplyCrop`, the bottom-bar button, and `sourceIndex` from the store history
+
+---
+
+### Change 41: In-app self-updater (CLI-driven, package-manager-aware)
+- **Files**: `src-tauri/src/updater.rs` (NEW), `src-tauri/src/commands.rs`, `src-tauri/src/lib.rs`, `src-tauri/Cargo.toml`, `.github/workflows/release.yml`, `src/lib/updater.ts` (NEW), `src/components/preferences/PreferencesPage.tsx`
+- **NOT** Tauri v2's built-in updater plugin. That plugin expects a `latest.json` layout and does the install itself, which fights FrameXShot shipping through Flatpak + deb + rpm + Arch + DMG + a `curl | sh` installer simultaneously.
+- **BEFORE**: New releases only reached users by manually re-running `install.sh` or noticing a GitHub notification.
+- **AFTER**:
+  - **Install-method detection gates everything.** `detect_install_method()` returns `Portable` / `Flatpak` / `SystemPackage` / `Homebrew` (ordered most-specific first: a Flatpak build could match the Homebrew path check by accident). **Only `Portable` may self-update.** Self-updating over a package-managed install produces a split-brain state — the running app diverges from what the manager tracks, and the next `flatpak update` silently overwrites it. For those, the About card shows the exact command instead of a download button (`flatpak update com.framexshot.app`, etc.).
+  - **SHA-256 verified before install.** `verify_checksum` fails on a *missing* checksum entry, not just a mismatch — an artifact the release never checksummed is not one to install.
+  - **Checksums fetched before the artifact** (they're ~1KB) so an unchecksummed release fails in seconds rather than after a 100MB download. Artifact streamed to disk, never buffered in memory.
+  - **Install hands off to `install.sh`** with `FXS_VERSION` pinned — it already knows the per-OS mechanics (DMG mount + `xattr -cr` for Gatekeeper on macOS). Deliberately not reimplemented.
+  - **Windows returns an explicit "not supported"** rather than offering a download that 404s (there is no `install.sh` path for it).
+  - `relaunch_app` uses Tauri core's `AppHandle::restart` — no `tauri-plugin-process` dependency.
+  - **release.yml**: each build job hashes its own bundle output (`sha256sum -b`, run where the files already are rather than re-downloading hundreds of MB through the API) and uploads a fragment; `publish` merges them and attaches `checksums.txt` to the draft release **before** publishing it.
+- **Bug caught by test**: `is_newer` originally split on every non-digit, which folded `1.3.0-beta.1` into `[1,3,0,1]` — comparing as NEWER than stable `1.3.0`, so a beta tag would push itself to users already on the release. The pre-release marker is now stripped from the numeric core and compared as a rank: stable beats its own pre-release, pre-release never replaces a release. Regression-guarded by 4 tests.
+- **New deps**: `reqwest` (`default-features = false` + `rustls` — native-tls would add a `libssl-dev` build dep the Flatpak manifest and Arch package don't carry) and `sha2`. Note `reqwest` was already in `Cargo.lock` transitively but built with **no TLS backend at all**, so HTTPS required adding one.
+- **Not covered**: real signing (minisign/GPG). SHA-256 over HTTPS catches corruption and truncation, not a compromised release account — which is also why the release pipeline already has a `GPG_PRIVATE_KEY` secret wired up for the Arch package, if this is ever worth escalating.
+- **REVERT**: delete `updater.rs`, the 4 commands, `lib/updater.ts`, the About card section, and the 2 checksum steps in `release.yml`; drop the reqwest/sha2 deps
+
+---
+
 ## CSS Variable Reference (shadcn oklch)
 
 | Tailwind Class    | Light (`:root`) | Dark (`.dark`) | Usage |
@@ -585,6 +664,7 @@ npm run test:rust     # cargo test in src-tauri
 - **Granular Zustand selectors**: Each settings property (`blurAmount`, `paddingTop`, etc.) has its own selector exported from `stores/index.ts`. Components subscribe to only what they need.
 - **Keep-mounted lazy loading**: Heavy pages (ImageEditor, Preferences, Onboarding) use `React.lazy()` + `Suspense` but are always present in the DOM tree. Inactive pages get `display: none` via `hidden` class. This avoids re-mount cost.
 - **Tray lifecycle**: Close button `hide()`s to tray (doesn't quit). Tray menu items `show_main_window()` → `app.emit()` → frontend handles the event. Quit from tray exits.
+- **Launch at login**: opt-in via Settings → General. `--hidden` is baked into the autostart registration at plugin init and cannot be rewritten, so whether it hides the window is a separate flag in `<app_config_dir>/autostart.json`, read in `setup()` before the window is built.
 - **Window management**: 3 windows all with `decorations(false)`. Main window created in setup (hidden), shown on demand. Quick-overlay is a small floating window spawned for notifications.
 
 ## Known Issues
