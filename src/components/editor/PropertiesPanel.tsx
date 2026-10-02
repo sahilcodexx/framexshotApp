@@ -42,6 +42,9 @@ export const PropertiesPanel = memo(function PropertiesPanel({ annotation, onUpd
       newExpanded.add("blur");
       newExpanded.delete("color");
     }
+    if (annotationType === "pen" || annotationType === "highlighter") {
+      newExpanded.add("stroke");
+    }
 
     setExpandedSections(newExpanded);
     // `annotationId` is intentionally a dependency without being read: switching
@@ -265,6 +268,52 @@ export const PropertiesPanel = memo(function PropertiesPanel({ annotation, onUpd
                   onValueChangeTransient={(v) => updateAnnotation({ radius: v })}
                   onValueCommit={(v) => updateAnnotation({ radius: v })}
                   aria-label="Number size"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {(annotation.type === "pen" || annotation.type === "highlighter") && (
+        <div className="space-y-1.5">
+          <button
+            onClick={() => toggleSection("stroke")}
+            className="w-full flex items-center justify-between text-xs font-medium text-foreground hover:text-foreground"
+          >
+            <span>Stroke</span>
+            {expandedSections.has("stroke") ? (
+              <ChevronUp className="size-3" />
+            ) : (
+              <ChevronDown className="size-3" />
+            )}
+          </button>
+          {expandedSections.has("stroke") && (
+            <div className="space-y-2 pl-2">
+              <div>
+                <RangeSliderDebounced
+                  label="Width"
+                  value={annotation.strokeWidth}
+                  format={(v) => `${Math.round(v)}px`}
+                  min={2}
+                  max={annotation.type === "highlighter" ? 60 : 24}
+                  step={1}
+                  onValueChangeTransient={(v) => updateAnnotation({ strokeWidth: v })}
+                  onValueCommit={(v) => updateAnnotation({ strokeWidth: v })}
+                  aria-label="Stroke width"
+                />
+              </div>
+              <div>
+                <RangeSliderDebounced
+                  label="Opacity"
+                  value={annotation.fill.opacity}
+                  format={(v) => `${Math.round(v)}%`}
+                  min={5}
+                  max={100}
+                  step={5}
+                  onValueChangeTransient={(v) => updateAnnotation({ fill: { ...annotation.fill, opacity: v } })}
+                  onValueCommit={(v) => updateAnnotation({ fill: { ...annotation.fill, opacity: v } })}
+                  aria-label="Stroke opacity"
                 />
               </div>
             </div>

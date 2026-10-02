@@ -166,6 +166,43 @@ export function drawAnnotationOnCanvas(
       }
       break;
     }
+    case "pen":
+    case "highlighter": {
+      const points = annotation.points;
+      if (points.length === 0) break;
+      const isHighlighter = annotation.type === "highlighter";
+      // Highlighter caps its alpha so the translucent stroke never goes
+      // opaque no matter what opacity the user picks; pen uses it directly.
+      ctx.strokeStyle = hexToRgba(
+        annotation.fill.hex,
+        isHighlighter ? Math.min(annotation.fill.opacity / 100, 0.45) : annotation.fill.opacity / 100
+      );
+      ctx.lineWidth = annotation.strokeWidth;
+      ctx.lineJoin = "round";
+      if (isHighlighter) {
+        // Square caps so segment joins don't double up and create dark dots
+        // where the translucent stroke overlaps itself.
+        ctx.lineCap = "square";
+      } else {
+        ctx.lineCap = "round";
+      }
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      if (points.length < 3) {
+        for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+      } else {
+        // Quadratic smoothing through segment midpoints — classic freehand
+        // curve: sampled point as control, midpoint as endpoint.
+        for (let i = 1; i < points.length - 1; i++) {
+          const mx = (points[i].x + points[i + 1].x) / 2;
+          const my = (points[i].y + points[i + 1].y) / 2;
+          ctx.quadraticCurveTo(points[i].x, points[i].y, mx, my);
+        }
+        ctx.lineTo(points[points.length - 1].x, points[points.length - 1].y);
+      }
+      ctx.stroke();
+      break;
+    }
   }
 
   ctx.restore();

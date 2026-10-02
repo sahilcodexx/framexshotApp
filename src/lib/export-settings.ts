@@ -13,6 +13,8 @@ export interface ExportPrefs {
   format: SaveFormat;
   /** Encoder quality 1-100 — only used for lossy formats (jpeg/webp). */
   quality: number;
+  /** Output size multiplier applied to the composed frame (0.5 / 1 / 2). */
+  scale: number;
   /**
    * Filename template. Tokens: %date → 2026-10-01, %time → 14-30-05.
    * The extension is appended by the Rust saver from the actual mime type.
@@ -21,9 +23,12 @@ export interface ExportPrefs {
 }
 
 export const DEFAULT_FILENAME_TEMPLATE = "framexshot %date %time";
+export const EXPORT_SCALES = [0.5, 1, 2] as const;
+
 export const DEFAULT_EXPORT_PREFS: ExportPrefs = {
   format: "png",
   quality: 90,
+  scale: 1,
   filenameTemplate: DEFAULT_FILENAME_TEMPLATE,
 };
 
@@ -34,6 +39,7 @@ export async function loadExportPrefs(): Promise<ExportPrefs> {
     const store = await Store.load("settings.json");
     const format = await store.get<SaveFormat>("saveFormat");
     const quality = await store.get<number>("saveQuality");
+    const scale = await store.get<number>("saveScale");
     const filenameTemplate = await store.get<string>("filenameTemplate");
     return {
       format: format && VALID_FORMATS.includes(format) ? format : DEFAULT_EXPORT_PREFS.format,
@@ -41,6 +47,10 @@ export async function loadExportPrefs(): Promise<ExportPrefs> {
         typeof quality === "number" && quality >= 1 && quality <= 100
           ? Math.round(quality)
           : DEFAULT_EXPORT_PREFS.quality,
+      scale:
+        typeof scale === "number" && (EXPORT_SCALES as readonly number[]).includes(scale)
+          ? scale
+          : DEFAULT_EXPORT_PREFS.scale,
       filenameTemplate:
         typeof filenameTemplate === "string" && filenameTemplate.trim()
           ? filenameTemplate

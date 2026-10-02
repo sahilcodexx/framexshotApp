@@ -1,4 +1,23 @@
-export type ToolType = "circle" | "rectangle" | "line" | "arrow" | "text" | "number" | "blur" | "select" | null;
+export type ToolType = "circle" | "rectangle" | "line" | "arrow" | "text" | "number" | "blur" | "pen" | "highlighter" | "crop" | "select" | null;
+
+/**
+ * A crop window into the LOGICAL frame space — the same coordinate space
+ * annotations live in (see AGENTS.md Change 35).
+ *
+ * Modelled as a window rather than a "the image is now smaller" flag so that
+ * annotations, padding and frame chrome all keep their original coordinates:
+ * cropping only changes which part of the composed frame is emitted, so
+ * resizing the crop back out restores the annotations untouched.
+ *
+ * Always normalized on write (positive width/height, inside the frame), which
+ * is what lets the renderer treat it as a plain source rect.
+ */
+export interface CropRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 export type LineType = "straight" | "curved";
 
@@ -83,6 +102,14 @@ export interface BlurAnnotation extends BaseAnnotation {
   blurAmount: number;
 }
 
+export interface PenAnnotation extends BaseAnnotation {
+  type: "pen" | "highlighter";
+  /** Freehand points in logical frame px. */
+  points: Point[];
+  /** Stroke width in logical px. */
+  strokeWidth: number;
+}
+
 export type Annotation =
   | CircleAnnotation
   | RectangleAnnotation
@@ -90,4 +117,5 @@ export type Annotation =
   | ArrowAnnotation
   | TextAnnotation
   | NumberAnnotation
-  | BlurAnnotation;
+  | BlurAnnotation
+  | PenAnnotation;

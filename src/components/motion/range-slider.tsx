@@ -25,7 +25,7 @@ export interface RangeSliderProps extends SliderOptions {
   className?: string;
 }
 
-export function RangeSlider({ showTicks = true, className, ...options }: RangeSliderProps) {
+export function RangeSlider({ showTicks = false, className, ...options }: RangeSliderProps) {
   const reduce = useReducedMotion();
   const { percent, dragging, min, max, step, trackProps, sliderProps } = useSlider(options);
 

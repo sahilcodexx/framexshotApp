@@ -11,7 +11,7 @@ import { BackgroundImageSelector } from "./BackgroundImageSelector";
 import { KeyboardShortcutManager } from "./KeyboardShortcutManager";
 import type { KeyboardShortcut } from "./KeyboardShortcutManager";
 import { useTheme } from "@/hooks/useTheme";
-import { buildFilenameFromTemplate, DEFAULT_FILENAME_TEMPLATE, type SaveFormat } from "@/lib/export-settings";
+import { buildFilenameFromTemplate, DEFAULT_FILENAME_TEMPLATE, EXPORT_SCALES, type SaveFormat } from "@/lib/export-settings";
 import { cn } from "@/lib/utils";
 
 interface PreferencesPageProps {
@@ -24,6 +24,7 @@ interface GeneralSettings {
   copyToClipboard: boolean;
   saveFormat: SaveFormat;
   saveQuality: number;
+  saveScale: number;
   filenameTemplate: string;
 }
 
@@ -56,6 +57,7 @@ export function PreferencesPage({ onBack, onSettingsChange }: PreferencesPagePro
         const saveDir = await store.get<string>("saveDir");
         const saveFormat = await store.get<SaveFormat>("saveFormat");
         const saveQuality = await store.get<number>("saveQuality");
+        const saveScale = await store.get<number>("saveScale");
         const filenameTemplate = await store.get<string>("filenameTemplate");
 
         setSettings({
@@ -66,6 +68,7 @@ export function PreferencesPage({ onBack, onSettingsChange }: PreferencesPagePro
             typeof saveQuality === "number" && saveQuality >= 1 && saveQuality <= 100
               ? Math.round(saveQuality)
               : 90,
+          saveScale: saveScale === 0.5 || saveScale === 2 ? saveScale : 1,
           filenameTemplate: filenameTemplate?.trim() ? filenameTemplate : DEFAULT_FILENAME_TEMPLATE,
         });
         setQuality(
@@ -289,6 +292,34 @@ export function PreferencesPage({ onBack, onSettingsChange }: PreferencesPagePro
                         )}
                       >
                         {fmt}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Export Scale */}
+                <div className="flex items-center justify-between py-2 border-t border-border/30 pt-4">
+                  <div className="space-y-0.5">
+                    <p className="text-xs font-medium text-foreground">Export scale</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      Output size multiplier — 0.5× halves file size, 2× for retina posts
+                    </p>
+                  </div>
+                  <div className="inline-flex items-center gap-1 rounded-full border border-border bg-secondary/60 p-1">
+                    {EXPORT_SCALES.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => updateSetting("saveScale", s)}
+                        aria-pressed={settings.saveScale === s}
+                        className={cn(
+                          "rounded-full px-3 py-1 text-[11px] font-medium tabular-nums transition-colors",
+                          settings.saveScale === s
+                            ? "bg-foreground text-background"
+                            : "text-muted-foreground hover:text-foreground"
+                        )}
+                      >
+                        {s}×
                       </button>
                     ))}
                   </div>

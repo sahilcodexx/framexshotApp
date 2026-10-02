@@ -215,11 +215,112 @@ export function getFrameDimensions(
   const scaledHeight = Math.round(screenshotImage.height * scale);
   const extraX = Math.round(scaledWidth * extraFactor);
   const extraY = Math.round(scaledHeight * extraFactor);
-  return {
+  const frame = {
     width:
       scaledWidth + padding.left + padding.right + extraX * 2 + framePad * 2,
     height:
       scaledHeight + padding.top + padding.bottom + extraY * 2 + framePad * 2,
+  };
+
+  return frame;
+}
+
+/**
+ * Normalize a raw crop rect against the frame it must fit inside.
+ *
+ * Every caller funnels through here so the renderer can treat the result as a
+ * plain source rect. Clamping to the frame and normalizing the drag direction
+ * (a rect dragged right-to-left arrives with negative width) means no drawing
+ * code has to think about inverted or out-of-bounds input.
+ *
+ * Returns null when nothing would actually be cropped — no selection, or a
+ * selection covering the whole frame — so the common case skips the extra
+ * canvas allocation entirely.
+ */
+export interface ImageContentRect {
+  /** Where the screenshot's top-left sits inside the logical frame. */
+  x: number;
+  y: number;
+  /** Rendered size of the screenshot, i.e. source size x imageScale. */
+  width: number;
+  height: number;
+  /** `settings.imageScale` — frame px per source-image px. */
+  scale: number;
+}
+
+/**
+ * Where the screenshot sits inside the composed frame.
+ *
+ * Crop is destructive: the selection is defined on the SOURCE IMAGE, and this
+ * is what maps between that and the logical frame space the canvas draws in.
+ * Everything that positions the image is derived here exactly as
+ * `renderFullCanvas` derives it (layout inset, frame padding, mockup header,
+ * pan offset), so the two can never drift — a single source of truth is the
+ * whole reason the selection lines up with what the user sees.
+ */
+export function getImageContentRect(
+  screenshotImage: { width: number; height: number },
+  settings: EditorSettings,
+  padding: { top: number; bottom: number; left: number; right: number }
+): ImageContentRect {
+  const layoutId = settings.layoutPreset || "flat";
+  const extraFactor = layoutPaddingFactor(layoutId);
+  const styleDef = getFrameStyle(settings.frameStyle || "default");
+  const framePad = settings.framePadding !== undefined && settings.framePadding >= 0
+    ? settings.framePadding
+    : styleDef.padding;
+
+  const scale = settings.imageScale ?? 1.0;
+  const width = Math.round(screenshotImage.width * scale);
+  const height = Math.round(screenshotImage.height * scale);
+
+  const extraX = Math.round(width * extraFactor);
+  const extraY = Math.round(height * extraFactor);
+
+  // The mockup title bar is drawn INSIDE the framed layer, above the image, so
+  // the image content starts below it. Skipping this would shift every crop
+  // selection up by 36px whenever a window frame is enabled.
+  const frameType =
+    settings.showMockup && settings.windowFrame && settings.windowFrame !== "none"
+      ? settings.windowFrame
+      : "none";
+  const headerHeight = frameType === "none" ? 0 : 36;
+
+  return {
+    x: padding.left + extraX + framePad + (settings.imageOffsetX ?? 0),
+    y: padding.top + extraY + framePad + (settings.imageOffsetY ?? 0) + headerHeight,
+    width,
+    height,
+    scale,
+  };
+}
+
+/**
+ * Frame coords -> source-image pixels.
+ *
+ * `imageRect.x/y` is the frame position of the image's CONTENT top-left (below
+ * the mockup header), so this does not need to know about the header.
+ */
+export function frameToImagePoint(
+  imageRect: ImageContentRect,
+  point: { x: number; y: number }
+): { x: number; y: number } {
+  return {
+    x: (point.x - imageRect.x) / imageRect.scale,
+    y: (point.y - imageRect.y) / imageRect.scale,
+  };
+}
+
+/**
+ * Source-image pixels -> frame coords.
+ */
+export function imageToFramePoint(
+  imageRect: ImageContentRect,
+  point: { x: number; y: number }
+): { x: number; y: number } {
+  return {
+    x: imageRect.x + point.x * imageRect.scale,
+    y: imageRect.y + point.y * imageRect.scale,
   };
 }
 
@@ -238,7 +339,7 @@ export function renderFullCanvas(
   settings: EditorSettings,
   padding: { top: number; bottom: number; left: number; right: number },
   bgImage: HTMLImageElement | null,
-  options: { renderEffects?: boolean; maxDimension?: number } = { renderEffects: true }
+  options: { renderEffects?: boolean; maxDimension?: number; outputScale?: number } = { renderEffects: true }
 ): HTMLCanvasElement {
   const { top: paddingTop, bottom: paddingBottom, left: paddingLeft, right: paddingRight } = padding;
   const renderEffects = options.renderEffects !== false;
@@ -280,6 +381,7 @@ export function renderFullCanvas(
 
   const bgWidth = drawW + padL + padR + extraX * 2 + outFramePad * 2;
   const bgHeight = drawH + padT + padB + extraY * 2 + outFramePad * 2;
+
   const contentPadL = padL + extraX + outFramePad;
   const contentPadT = padT + extraY + outFramePad;
 
@@ -305,7 +407,7 @@ export function renderFullCanvas(
       saturation: settings.saturation ?? 0,
       sharpness: settings.sharpness ?? 0,
     });
-    return canvas;
+    return maybeScaleOutput(canvas, options.outputScale);
   }
 
   // Background plate
@@ -363,7 +465,26 @@ export function renderFullCanvas(
   ctx.shadowOffsetY = 0;
   ctx.restore();
 
-  return canvas;
+  return maybeScaleOutput(canvas, options.outputScale);
+}
+
+/**
+ * Apply the user's export scale (0.5× / 1× / 2×) to a finished composite.
+ * Runs AFTER all drawing so internal geometry never has to know about it;
+ * annotations are drawn by the caller AFTER this, directly at output size.
+ */
+function maybeScaleOutput(canvas: HTMLCanvasElement, outputScale?: number): HTMLCanvasElement {
+  const scale = outputScale ?? 1;
+  if (scale === 1 || canvas.width === 0) return canvas;
+  const out = document.createElement("canvas");
+  out.width = Math.max(1, Math.round(canvas.width * scale));
+  out.height = Math.max(1, Math.round(canvas.height * scale));
+  const octx = out.getContext("2d");
+  if (!octx) return canvas;
+  octx.imageSmoothingEnabled = true;
+  octx.imageSmoothingQuality = scale < 1 ? "high" : "high";
+  octx.drawImage(canvas, 0, 0, out.width, out.height);
+  return out;
 }
 
 /**
@@ -691,7 +812,11 @@ export interface PreviewGeneratorResult {
   previewUrl: string | null;
   isGenerating: boolean;
   error: string | null;
-  renderHighQualityCanvas: (annotations: Annotation[], imagePath?: string) => Promise<HTMLCanvasElement | null>;
+  renderHighQualityCanvas: (
+    annotations: Annotation[],
+    imagePath?: string,
+    opts?: { outputScale?: number }
+  ) => Promise<HTMLCanvasElement | null>;
 }
 
 const PREVIEW_DEBOUNCE_MS = 16;
@@ -1018,9 +1143,15 @@ export function usePreviewGenerator({
     };
   }, []);
 
-  // High quality canvas render for save/copy — same pipeline as preview
+  // High quality canvas render for save/copy — same pipeline as preview.
+  // `outputScale` (from the user's export prefs) resizes the composite and
+  // annotations are drawn to match, so a 2x export stays sharp.
   const renderHighQualityCanvas = useCallback(
-    async (annotations: Annotation[], _imagePath?: string): Promise<HTMLCanvasElement | null> => {
+    async (
+      annotations: Annotation[],
+      _imagePath?: string,
+      opts?: { outputScale?: number }
+    ): Promise<HTMLCanvasElement | null> => {
       if (!screenshotImage) return null;
 
       try {
@@ -1030,29 +1161,32 @@ export function usePreviewGenerator({
           bgImage = await loadImage(bgSrc);
         }
 
+        const outputScale = opts?.outputScale ?? 1;
         const canvas = renderFullCanvas(
           screenshotImage,
           settings,
           { top: paddingTop, bottom: paddingBottom, left: paddingLeft, right: paddingRight },
           bgImage,
-          { renderEffects: true }
+          { renderEffects: true, outputScale }
         );
 
         if (annotations.length > 0) {
           const ctx = canvas.getContext("2d");
           if (ctx) {
-            // Annotations live in the LOGICAL frame space (same space the
-            // editor canvas uses), which is exactly the export canvas size —
-            // so they draw 1:1 with no scaling hack. The blur annotation
-            // drops to device space internally via frameScale = 1.
+            // Annotations live in the LOGICAL frame space; scale them onto the
+            // output-sized canvas. blur drops to device space internally with
+            // frameScale = outputScale.
             ctx.save();
+            if (outputScale !== 1) {
+              ctx.scale(outputScale, outputScale);
+            }
             const nonText = annotations.filter((a) => a.type !== "text");
             const textAnns = annotations.filter((a) => a.type === "text");
             nonText.forEach((annotation) => {
-              drawAnnotationOnCanvas(ctx, annotation, { frameScale: 1, uiScale: 1 });
+              drawAnnotationOnCanvas(ctx, annotation, { frameScale: outputScale, uiScale: 1 });
             });
             textAnns.forEach((annotation) => {
-              drawAnnotationOnCanvas(ctx, annotation, { frameScale: 1, uiScale: 1 });
+              drawAnnotationOnCanvas(ctx, annotation, { frameScale: outputScale, uiScale: 1 });
             });
             ctx.restore();
           }

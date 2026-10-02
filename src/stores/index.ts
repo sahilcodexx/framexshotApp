@@ -37,6 +37,7 @@ export {
   usePaddingBottom,
   usePaddingLeft,
   usePaddingRight,
+  useSourceIndex,
 } from "./editorStore";
 
 export type {

@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback, memo } from "react";
-import { Annotation, ToolType, Point } from "@/types/annotations";
+import { Annotation, ToolType, Point, PenAnnotation, CropRegion } from "@/types/annotations";
 import { drawAnnotationOnCanvas } from "@/lib/annotation-utils";
 import { cn } from "@/lib/utils";
 
@@ -35,6 +35,22 @@ interface AnnotationCanvasProps {
    * (900px) and rest (1400px). Falls back to the buffer size when absent.
    */
   frameSize?: { width: number; height: number } | null;
+  /**
+   * Committed crop selection, in logical FRAME coords.
+   *
+   * The crop is destructive, so there is no permanent viewport to hold — this
+   * is just the pending selection, expressed in frame coords because that is
+   * what the canvas draws in. The parent maps it to source-image pixels.
+   */
+  cropSelection?: CropRegion | null;
+  /**
+   * The screenshot's content rect in frame coords. The selection is clamped to
+   * it, so a drag cannot run off into the padding/background — cropping those
+   * would delete pixels that were never part of the screenshot.
+   */
+  imageContentRect?: { x: number; y: number; width: number; height: number } | null;
+  /** Commit a finished selection drag, in frame coords. */
+  onCropSelect?: (rect: CropRegion | null) => void;
   showTransparencyGrid?: boolean;
   onAnnotationAdd: (annotation: Annotation) => void;
   /** Called on drag end - should commit to history */
@@ -52,7 +68,7 @@ function cloneAnnotations(list: Annotation[]): Annotation[] {
       fill: { ...ann.fill },
       border: {
         width: ann.border.width,
-        color: { ...ann.border.color },
+      color: { ...ann.border.color },
       },
       alignment: { ...ann.alignment },
     } as Annotation;
@@ -61,6 +77,13 @@ function cloneAnnotations(list: Annotation[]): Annotation[] {
       (copy as Annotation & { controlPoints?: Point[] }).controlPoints = ann.controlPoints.map((cp) => ({
         x: cp.x,
         y: cp.y,
+      }));
+    }
+
+    if ("points" in ann && ann.points) {
+      (copy as Annotation & { points: Point[] }).points = ann.points.map((p) => ({
+        x: p.x,
+        y: p.y,
       }));
     }
 
@@ -76,12 +99,177 @@ function isActivelyInteracting(ds: {
   return !!(ds.isDrawing || ds.draggingAnnotationId || ds.resizingAnnotationId);
 }
 
+/**
+ * The rect the crop gesture currently represents.
+ *
+ * Uses the live pointer position while dragging and falls back to the
+ * committed crop, so the overlay shows the committed rect before a drag starts
+ * and follows the cursor during one.
+ */
+function liveCropRect(ds: {
+  cropAnchor: Point | null;
+  cropCurrent: Point | null;
+  cropMoving: CropRegion | null;
+}): CropRegion | null {
+  const anchor = ds.cropAnchor;
+  if (!anchor) return null;
+  const current = ds.cropCurrent ?? anchor;
+
+  if (ds.cropMoving) {
+    // Moving an existing crop: size is fixed, position tracks the delta.
+    return {
+      x: ds.cropMoving.x + (current.x - anchor.x),
+      y: ds.cropMoving.y + (current.y - anchor.y),
+      width: ds.cropMoving.width,
+      height: ds.cropMoving.height,
+    };
+  }
+
+  return {
+    x: Math.min(anchor.x, current.x),
+    y: Math.min(anchor.y, current.y),
+    width: Math.abs(current.x - anchor.x),
+    height: Math.abs(current.y - anchor.y),
+  };
+}
+
+/**
+ * Crop overlay: everything outside the selection is dimmed, the selection gets
+ * a border plus rule-of-thirds guides and corner brackets.
+ *
+ * The dim is drawn over the whole FRAME (the user needs to see the background
+ * and padding go away once cropped), but `bounds` — the screenshot's own rect
+ * — is outlined separately: the selection can never extend past it, so the
+ * outline makes the actionable area unambiguous instead of leaving the user to
+ * discover the edge by dragging.
+ *
+ * With NO selection there is deliberately NO dim. Dimming the entire frame on
+ * tool activation reads as a broken or greyed-out image rather than as "drag to
+ * select", which is the state the user is actually in. Only the dashed bounds
+ * outline shows, so the croppable area is obvious and everything is still
+ * legible.
+ */
+function drawCropOverlay(
+  ctx: CanvasRenderingContext2D,
+  rect: CropRegion | null,
+  logicalW: number,
+  logicalH: number,
+  uiScale: number,
+  bounds: { x: number; y: number; width: number; height: number } | null
+) {
+  // Outline the croppable area first so it reads as the canvas edge.
+  if (bounds) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+    ctx.lineWidth = Math.max(1, Math.round(uiScale));
+    ctx.setLineDash([6 * uiScale, 5 * uiScale]);
+    ctx.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
+    ctx.restore();
+  }
+
+  if (!rect || rect.width < 1 || rect.height < 1) {
+    return;
+  }
+
+  const dim = "rgba(0, 0, 0, 0.55)";
+
+  const { x, y, width, height } = rect;
+
+  // Dim the four bands around the selection rather than punching a hole —
+  // avoids save/restore around a composite operation.
+  ctx.fillStyle = dim;
+  ctx.fillRect(0, 0, logicalW, y);
+  ctx.fillRect(0, y + height, logicalW, logicalH - (y + height));
+  ctx.fillRect(0, y, x, height);
+  ctx.fillRect(x + width, y, logicalW - (x + width), height);
+
+  const line = Math.max(1, Math.round(uiScale));
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+  ctx.lineWidth = line;
+  ctx.strokeRect(x, y, width, height);
+
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+  ctx.lineWidth = Math.max(1, line * 0.75);
+  ctx.beginPath();
+  for (let i = 1; i <= 2; i++) {
+    const gx = x + (width * i) / 3;
+    const gy = y + (height * i) / 3;
+    ctx.moveTo(gx, y);
+    ctx.lineTo(gx, y + height);
+    ctx.moveTo(x, gy);
+    ctx.lineTo(x + width, gy);
+  }
+  ctx.stroke();
+
+  // Corner brackets — constant size on screen, like every other chrome here.
+  const arm = Math.min(Math.max(12 * uiScale, 4), Math.min(width, height) / 3);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = Math.max(2, line * 2);
+  ctx.beginPath();
+  const corners: Array<[number, number, number, number]> = [
+    [x, y, 1, 1],
+    [x + width, y, -1, 1],
+    [x, y + height, 1, -1],
+    [x + width, y + height, -1, -1],
+  ];
+  for (const [cx, cy, dx, dy] of corners) {
+    ctx.moveTo(cx + dx * arm, cy);
+    ctx.lineTo(cx, cy);
+    ctx.lineTo(cx, cy + dy * arm);
+  }
+  ctx.stroke();
+}
+
+/**
+ * Clamp a frame-space point into the screenshot's content rect.
+ *
+ * Cropping outside the image would mean deleting pixels of the background or
+ * padding, which is not something the source image even contains — so the
+ * selection is hard-bounded here rather than corrected after the fact.
+ */
+function clampToImageRect(
+  point: Point,
+  bounds: { x: number; y: number; width: number; height: number } | null
+): Point {
+  if (!bounds) return point;
+  return {
+    x: Math.max(bounds.x, Math.min(point.x, bounds.x + bounds.width)),
+    y: Math.max(bounds.y, Math.min(point.y, bounds.y + bounds.height)),
+  };
+}
+
+/**
+ * Coalesce crop-drag redraws to one per animation frame.
+ *
+ * `redraw` re-blits the full-resolution screenshot every call, so calling it
+ * straight from `pointermove` queues one full-frame composite per event — mice
+ * poll at 125-1000Hz against a 60Hz display, so the overlay visibly trails the
+ * cursor. Only the latest pointer position matters, so earlier frames are
+ * simply dropped.
+ */
+function scheduleCropRedraw() {
+  if (cropRafPending) return;
+  cropRafPending = true;
+  requestAnimationFrame(() => {
+    cropRafPending = false;
+    cropRedrawFn?.();
+  });
+}
+
+// Module-level indirection so the helper can live outside the component without
+// taking a dependency on it (and therefore without re-creating it each render).
+let cropRafPending = false;
+let cropRedrawFn: (() => void) | null = null;
+
 export const AnnotationCanvas = memo(function AnnotationCanvas({
   annotations,
   selectedAnnotation,
   selectedTool,
   previewUrl,
   frameSize,
+  cropSelection = null,
+  imageContentRect = null,
+  onCropSelect,
   showTransparencyGrid = false,
   onAnnotationAdd,
   onAnnotationUpdate,
@@ -95,7 +283,6 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
   
   // Mutable working copy — never point at Immer-frozen store arrays
   const annotationsRef = useRef<Annotation[]>(cloneAnnotations(annotations));
-  
   // Mutable drag state (no React re-renders during drag)
   const dragStateRef = useRef({
     isDrawing: false,
@@ -110,7 +297,26 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
     resizeStartAnnotation: null as Annotation | null,
     hoveredHandleId: null as string | null,
     nextNumber: 1,
+    /** Live point list for the in-progress freehand stroke. */
+    penPointsRef: null as { points: Point[] } | null,
+    /** Crop gesture: anchor point of the in-progress selection. */
+    cropAnchor: null as Point | null,
+    /** Current pointer position during a crop drag. */
+    cropCurrent: null as Point | null,
+    /**
+     * Existing crop at mousedown, when the drag MOVES it rather than drawing a
+     * new one. Null means "this gesture is drawing a fresh rect".
+     */
+    cropMoving: null as CropRegion | null,
+    /** Whether the crop gesture actually moved (a stray click must not commit). */
+    cropMoved: false,
   });
+
+  // Live copy for the pointer handlers, which run outside render.
+  const imageRectRef = useRef(imageContentRect);
+  imageRectRef.current = imageContentRect;
+  const cropSelectionRef = useRef(cropSelection);
+  cropSelectionRef.current = cropSelection;
   
   // Local state for drag operation - minimal React state for rendering triggers
   const [imageLoaded, setImageLoaded] = useState(false);
@@ -291,6 +497,20 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
             width: Math.abs(end.x - start.x),
             height: Math.abs(end.y - start.y),
             blurAmount: 20,
+            fill: defaultColor,
+            border: defaultBorder,
+            alignment: defaultAlignment,
+          };
+        }
+        case "pen":
+        case "highlighter": {
+          return {
+            id: generateId(),
+            type,
+            x: start.x,
+            y: start.y,
+            points: [start, end],
+            strokeWidth: (type === "highlighter" ? 20 : 5) * ui,
             fill: defaultColor,
             border: defaultBorder,
             alignment: defaultAlignment,
@@ -502,6 +722,26 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
           point.y <= annotation.y + annotation.height + margin
         );
       }
+      case "pen":
+      case "highlighter": {
+        // Hit when the pointer is within tolerance of any stroke segment.
+        const tol = Math.max(annotation.strokeWidth / 2 + 12 * ui, 16 * ui);
+        const pts = annotation.points;
+        for (let i = 0; i < pts.length - 1; i++) {
+          const dx = pts[i + 1].x - pts[i].x;
+          const dy = pts[i + 1].y - pts[i].y;
+          const lengthSq = dx * dx + dy * dy;
+          let distance: number;
+          if (lengthSq === 0) {
+            distance = Math.hypot(point.x - pts[i].x, point.y - pts[i].y);
+          } else {
+            const t = Math.max(0, Math.min(1, ((point.x - pts[i].x) * dx + (point.y - pts[i].y) * dy) / lengthSq));
+            distance = Math.hypot(point.x - (pts[i].x + t * dx), point.y - (pts[i].y + t * dy));
+          }
+          if (distance <= tol) return true;
+        }
+        return false;
+      }
       default:
         return false;
     }
@@ -661,6 +901,23 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
             ctx.stroke();
             break;
           }
+          case "pen":
+          case "highlighter": {
+            // Bounding box of the whole path, padded by half the stroke.
+            const pts = annotation.points;
+            if (pts.length > 0) {
+              let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+              for (const p of pts) {
+                if (p.x < minX) minX = p.x;
+                if (p.y < minY) minY = p.y;
+                if (p.x > maxX) maxX = p.x;
+                if (p.y > maxY) maxY = p.y;
+              }
+              const pad = annotation.strokeWidth / 2 + 5 * ui;
+              ctx.strokeRect(minX - pad, minY - pad, maxX - minX + pad * 2, maxY - minY + pad * 2);
+            }
+            break;
+          }
         }
         
         ctx.setLineDash([]);
@@ -745,13 +1002,54 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
     }
 
     const ds = dragStateRef.current;
-    if (ds.isDrawing && ds.startPoint && ds.currentPoint && selectedTool && selectedTool !== "select") {
-      const tempAnnotation = createAnnotation(selectedTool, ds.startPoint, ds.currentPoint);
-      if (tempAnnotation) {
-        drawAnnotation(ctx, tempAnnotation, false);
+    if (selectedTool === "crop") {
+      const bounds = imageRectRef.current;
+      drawCropOverlay(
+        ctx,
+        ds.cropAnchor ? liveCropRect(ds) : cropSelectionRef.current,
+        logicalW,
+        logicalH,
+        uiScaleRef.current,
+        bounds
+      );
+      return;
+    }
+    if (ds.isDrawing && ds.startPoint && selectedTool && selectedTool !== "select") {
+      if ((selectedTool === "pen" || selectedTool === "highlighter") && ds.penPointsRef) {
+        // Live freehand preview: draw the accumulated path directly.
+        drawAnnotationOnCanvas(ctx, {
+          id: "temp-pen",
+          type: selectedTool,
+          x: ds.startPoint.x,
+          y: ds.startPoint.y,
+          points: ds.penPointsRef.points,
+          strokeWidth: (selectedTool === "highlighter" ? 20 : 5) * Math.max(1, uiScaleRef.current),
+          fill: { hex: "#FF3300", opacity: 100 },
+          border: { width: 0, color: { hex: "#FF3300", opacity: 100 } },
+          alignment: { horizontal: "left", vertical: "top" },
+        }, { frameScale: frameScaleRef.current, uiScale: uiScaleRef.current });
+      } else if (ds.currentPoint) {
+        const tempAnnotation = createAnnotation(selectedTool, ds.startPoint, ds.currentPoint);
+        if (tempAnnotation) {
+          drawAnnotation(ctx, tempAnnotation, false);
+        }
       }
     }
   }, [imageLoaded, selectedAnnotation, selectedTool, drawAnnotation, createAnnotation]);
+
+  // Publish the latest redraw for the frame-coalescing crop scheduler. Assigned
+  // during render (like the other *_ref.current = prop mirrors in this file) so
+  // the scheduler never calls a stale closure.
+  cropRedrawFn = redraw;
+
+  useEffect(
+    () => () => {
+      // Drop the binding so a queued frame cannot fire into an unmounted tree.
+      cropRedrawFn = null;
+      cropRafPending = false;
+    },
+    []
+  );
 
   useEffect(() => {
     redraw();
@@ -784,6 +1082,32 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
     const point = getCanvasCoordinates(e);
     const ds = dragStateRef.current;
     const currentAnnotations = annotationsRef.current;
+
+    // Crop tool takes priority over every annotation interaction — it edits
+    // the frame window, not the annotations drawn inside it.
+    if (selectedTool === "crop") {
+      e.preventDefault();
+      const clamped = clampToImageRect(point, imageRectRef.current);
+
+      ds.cropAnchor = clamped;
+      ds.cropCurrent = clamped;
+      ds.cropMoved = false;
+      // Dragging from inside the existing rect MOVES it (keeping its size);
+      // dragging from anywhere else draws a new one. Moving is what makes an
+      // earlier crop adjustable without having to start over.
+      const existing = cropSelectionRef.current;
+      ds.cropMoving =
+        existing &&
+        clamped.x >= existing.x &&
+        clamped.x <= existing.x + existing.width &&
+        clamped.y >= existing.y &&
+        clamped.y <= existing.y + existing.height
+          ? { ...existing }
+          : null;
+      onAnnotationSelect(null);
+      redraw();
+      return;
+    }
 
     // Check if clicking resize handles of currently selected annotation
     if (selectedAnnotation && selectedAnnotation.type !== "blur") {
@@ -890,6 +1214,9 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
       ds.isDrawing = true;
       ds.startPoint = point;
       ds.currentPoint = point;
+      if (selectedTool === "pen" || selectedTool === "highlighter") {
+        ds.penPointsRef = { points: [point] };
+      }
     }
   };
 
@@ -1055,6 +1382,21 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
     const canvas = canvasRef.current;
     const ds = dragStateRef.current;
 
+    // Crop drag: redraw only, never touch annotations or the store. The
+    // overlay is drawn from ds.cropAnchor/cropCurrent so the rect tracks the
+    // cursor without a React render per pointermove.
+    if (selectedTool === "crop" && ds.cropAnchor) {
+      ds.cropCurrent = clampToImageRect(point, imageRectRef.current);
+      if (
+        ds.cropCurrent.x !== ds.cropAnchor.x ||
+        ds.cropCurrent.y !== ds.cropAnchor.y
+      ) {
+        ds.cropMoved = true;
+      }
+      scheduleCropRedraw();
+      return;
+    }
+
     const resizeHandle = ds.resizeHandle;
     const resizeStartPoint = ds.resizeStartPoint;
     const resizeStartAnnotation = ds.resizeStartAnnotation;
@@ -1113,6 +1455,12 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
                 }));
             }
           }
+          if ((annotation.type === "pen" || annotation.type === "highlighter") && (startAnn.type === "pen" || startAnn.type === "highlighter")) {
+            (updated as Annotation & { points: Point[] }).points = startAnn.points.map((p) => ({
+              x: p.x + dx,
+              y: p.y + dy,
+            }));
+          }
           const idx = currentAnnotations.findIndex((ann) => ann.id === annotation.id);
           if (idx !== -1) {
             currentAnnotations[idx] = updated as Annotation;
@@ -1122,6 +1470,15 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
       });
     } else if (ds.isDrawing && ds.startPoint) {
       ds.currentPoint = point;
+      // Freehand tools accumulate sampled points along the gesture instead of
+      // just tracking the current endpoint; redraw paints the whole path.
+      if ((selectedTool === "pen" || selectedTool === "highlighter") && ds.penPointsRef) {
+        const pts = ds.penPointsRef.points;
+        const last = pts[pts.length - 1];
+        if (!last || Math.hypot(point.x - last.x, point.y - last.y) >= 2) {
+          pts.push({ x: point.x, y: point.y });
+        }
+      }
       redraw();
     } else if (selectedTool === "select" && selectedAnnotation && selectedAnnotation.type !== "blur" && canvas) {
       const liveSelected =
@@ -1168,19 +1525,88 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
     const ds = dragStateRef.current;
     const currentAnnotations = annotationsRef.current;
 
+    // Commit the crop gesture. Runs before the annotation branches because the
+    // crop tool never sets isDrawing — but it must also reset the crop drag
+    // state even when nothing moved (a stray click inside the existing rect).
+    if (ds.cropAnchor) {
+      const anchor = ds.cropAnchor;
+      const current = ds.cropCurrent ?? anchor;
+      const moved = ds.cropMoved;
+      const moving = ds.cropMoving;
+
+      ds.cropAnchor = null;
+      ds.cropCurrent = null;
+      ds.cropMoving = null;
+      ds.cropMoved = false;
+
+      if (onCropSelect && moved) {
+        const b = imageRectRef.current;
+        const next = moving
+          ? (() => {
+              // Preserve the dragged rect's SIZE, shift it by the pointer
+              // delta, then keep it inside the image.
+              const moved2 = {
+                x: moving.x + (current.x - anchor.x),
+                y: moving.y + (current.y - anchor.y),
+                width: moving.width,
+                height: moving.height,
+              };
+              if (!b) return moved2;
+              return {
+                ...moved2,
+                x: Math.max(b.x, Math.min(moved2.x, b.x + b.width - moved2.width)),
+                y: Math.max(b.y, Math.min(moved2.y, b.y + b.height - moved2.height)),
+              };
+            })()
+          : {
+              x: Math.min(anchor.x, current.x),
+              y: Math.min(anchor.y, current.y),
+              // A right-to-left / bottom-to-top drag arrives inverted.
+              width: Math.abs(current.x - anchor.x),
+              height: Math.abs(current.y - anchor.y),
+            };
+        onCropSelect(next);
+      }
+      redraw();
+      return;
+    }
+
     if (ds.isDrawing && ds.startPoint && ds.currentPoint && selectedTool && selectedTool !== "select") {
-      const newAnnotation = createAnnotation(selectedTool, ds.startPoint, ds.currentPoint);
-      if (newAnnotation) {
-        onAnnotationAdd(newAnnotation);
-        if (selectedTool === "number") {
-          ds.nextNumber++;
-        } else {
-          onToolSelect?.("select");
+      if ((selectedTool === "pen" || selectedTool === "highlighter") && ds.penPointsRef) {
+        // Freehand: commit the accumulated path as one annotation.
+        const points = ds.penPointsRef.points;
+        const last = points[points.length - 1];
+        if (last && (last.x !== ds.startPoint.x || last.y !== ds.startPoint.y)) {
+          points.push({ x: ds.startPoint.x + (ds.currentPoint.x - ds.startPoint.x), y: ds.startPoint.y + (ds.currentPoint.y - ds.startPoint.y) });
+        }
+        const stroke: PenAnnotation = {
+          id: generateId(),
+          type: selectedTool,
+          x: ds.startPoint.x,
+          y: ds.startPoint.y,
+          points,
+          strokeWidth: (selectedTool === "highlighter" ? 20 : 5) * Math.max(1, uiScaleRef.current),
+          fill: { hex: "#FF3300", opacity: 100 },
+          border: { width: 0, color: { hex: "#FF3300", opacity: 100 } },
+          alignment: { horizontal: "left", vertical: "top" },
+        };
+        onAnnotationAdd(stroke);
+        onToolSelect?.("select");
+      } else {
+        const newAnnotation = createAnnotation(selectedTool, ds.startPoint, ds.currentPoint);
+        if (newAnnotation) {
+          onAnnotationAdd(newAnnotation);
+          if (selectedTool === "number") {
+            ds.nextNumber++;
+          } else {
+            onToolSelect?.("select");
+          }
         }
       }
       ds.isDrawing = false;
       ds.startPoint = null;
       ds.currentPoint = null;
+      ds.penPointsRef = null;
     } else if (ds.resizingAnnotationId && ds.resizeStartAnnotation) {
       const annotation = currentAnnotations.find((ann) => ann.id === ds.resizingAnnotationId);
       if (annotation) {

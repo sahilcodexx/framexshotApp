@@ -83,6 +83,16 @@ export interface EditorSettings {
 interface HistorySnapshot {
   settings: EditorSettings;
   annotations: Annotation[];
+  /**
+   * Which version of the source image this snapshot describes.
+   *
+   * Crop is destructive — it swaps in a genuinely smaller image rather than
+   * hiding part of the old one — so undoing it means restoring the previous
+   * image, not just the previous annotations. The actual images are held by
+   * ImageEditor (which owns them); the store only tracks the index, because
+   * snapshotting a multi-megabyte data URL 50 times would be a memory leak.
+   */
+  sourceIndex: number;
 }
 
 interface EditorState {
@@ -95,6 +105,12 @@ interface EditorState {
   // History slice
   past: HistorySnapshot[];
   future: HistorySnapshot[];
+
+  /**
+   * Index into ImageEditor's source-image list. 0 is the original capture;
+   * each crop appends. Part of undo/redo — see HistorySnapshot.
+   */
+  sourceIndex: number;
   
   // Transient state (not part of history)
   _isInitialized: boolean;
@@ -114,6 +130,8 @@ interface EditorActions {
 
   // Settings actions - commit to history
   updateSettings: (updates: Partial<EditorSettings>) => void;
+  /** Switch the source image version. Does NOT push history — call pushHistory first. */
+  setSourceIndex: (index: number) => void;
   setBackgroundType: (type: BackgroundType) => void;
   setCustomColor: (color: string) => void;
   setSelectedImage: (src: string) => void;
@@ -256,6 +274,7 @@ const INITIAL_STATE: EditorState = {
   annotations: [],
   past: [],
   future: [],
+  sourceIndex: 0,
   _isInitialized: false,
   _historyPaused: false,
   _isDragging: false,
@@ -444,9 +463,19 @@ export const useEditorStore = create<EditorStore>()(
         });
       },
 
+      setSourceIndex: (index) => {
+        set((s) => {
+          s.sourceIndex = index;
+          // A new source invalidates the redo branch: those snapshots describe
+          // images derived from a version that no longer exists.
+          s.future = [];
+        });
+      },
+
       setBackgroundType: (type) => {
         get().updateSettings({ backgroundType: type });
       },
+
 
       setWindowFrame: (frame) => {
         get().updateSettings({ windowFrame: frame, showMockup: frame !== "none" });
@@ -906,6 +935,7 @@ export const useEditorStore = create<EditorStore>()(
         const snapshot: HistorySnapshot = {
           settings: structuredClone(state.settings),
           annotations: structuredClone(state.annotations),
+          sourceIndex: state.sourceIndex,
         };
         
         set((s) => {
@@ -943,6 +973,7 @@ export const useEditorStore = create<EditorStore>()(
         const currentSnapshot: HistorySnapshot = {
           settings: structuredClone(state.settings),
           annotations: structuredClone(state.annotations),
+          sourceIndex: state.sourceIndex,
         };
 
         set((s) => {
@@ -950,6 +981,10 @@ export const useEditorStore = create<EditorStore>()(
           s.future = [currentSnapshot, ...s.future].slice(0, MAX_HISTORY_SIZE);
           s.settings = previous.settings;
           s.annotations = previous.annotations;
+          // Restores the pre-crop image alongside the pre-crop annotations —
+          // without this, undo after a crop leaves the cropped image in place
+          // and the annotations land on the wrong pixels.
+          s.sourceIndex = previous.sourceIndex;
         });
       },
 
@@ -961,6 +996,7 @@ export const useEditorStore = create<EditorStore>()(
         const currentSnapshot: HistorySnapshot = {
           settings: structuredClone(state.settings),
           annotations: structuredClone(state.annotations),
+          sourceIndex: state.sourceIndex,
         };
 
         set((s) => {
@@ -968,6 +1004,7 @@ export const useEditorStore = create<EditorStore>()(
           s.past = [...s.past, currentSnapshot].slice(-MAX_HISTORY_SIZE);
           s.settings = next.settings;
           s.annotations = next.annotations;
+          s.sourceIndex = next.sourceIndex;
         });
       },
 
@@ -980,6 +1017,8 @@ export const useEditorStore = create<EditorStore>()(
           state.annotations = [];
           state.past = [];
           state.future = [];
+          // Back to the original, un-cropped capture.
+          state.sourceIndex = 0;
           state._isInitialized = false;
         });
       },
@@ -998,6 +1037,7 @@ export const useBackgroundType = () => useEditorStore((state) => state.settings.
 export const useBlurAmount = () => useEditorStore((state) => state.settings.blurAmount);
 export const useNoiseAmount = () => useEditorStore((state) => state.settings.noiseAmount);
 export const useBorderRadius = () => useEditorStore((state) => state.settings.borderRadius);
+export const useSourceIndex = () => useEditorStore((state) => state.sourceIndex);
 export const usePaddingTop = () => useEditorStore((state) => state.settings.paddingTop);
 export const usePaddingBottom = () => useEditorStore((state) => state.settings.paddingBottom);
 export const usePaddingLeft = () => useEditorStore((state) => state.settings.paddingLeft);
@@ -1107,6 +1147,8 @@ export const editorActions = {
   get resumeHistory() { return useEditorStore.getState().resumeHistory; },
   get reset() { return useEditorStore.getState().reset; },
   get setIsDragging() { return useEditorStore.getState().setIsDragging; },
+  get updateSettings() { return useEditorStore.getState().updateSettings; },
+  get setSourceIndex() { return useEditorStore.getState().setSourceIndex; },
 };
 
 // Hook version - returns the stable actions object

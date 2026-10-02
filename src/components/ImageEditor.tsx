@@ -3,7 +3,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Store } from "@tauri-apps/plugin-store";
 import { toast } from "sonner";
-import { Loader2, Redo2, Undo2 } from "lucide-react";
+import { Loader2, Redo2, Undo2, Crop } from "lucide-react";
 import { TitleBar } from "@/components/TitleBar";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -11,7 +11,20 @@ import { AnnotationToolbar } from "./editor/AnnotationToolbar";
 import { AnnotationCanvas } from "./editor/AnnotationCanvas";
 import { RightSidebar } from "./editor/RightSidebar";
 import { Annotation, ToolType } from "@/types/annotations";
-import { usePreviewGenerator, getFrameDimensions } from "@/hooks/usePreviewGenerator";
+import {
+  usePreviewGenerator,
+  getFrameDimensions,
+  getImageContentRect,
+  frameToImagePoint,
+  type ImageContentRect,
+} from "@/hooks/usePreviewGenerator";
+import {
+  cropCanvasToDataUrl,
+  normalizeSelection,
+  rebaseAnnotationsForCrop,
+  resolveSourcePath,
+} from "@/lib/crop-selection";
+import type { CropRegion } from "@/types/annotations";
 import {
   buildFilenameFromTemplate,
   canvasToDataUrl,
@@ -34,6 +47,7 @@ import {
   useShowMockup,
   useNoiseAmount,
   useBorderRadius,
+  useSourceIndex,
   usePaddingTop,
   usePaddingBottom,
   usePaddingLeft,
@@ -61,6 +75,9 @@ interface ImageEditorProps {
   onSave: (editedImageData: string, filename?: string) => void;
   onCancel: () => void;
 }
+
+/** Captures kept in the source-image list before the oldest is dropped. */
+const MAX_SOURCE_CAPTURES = 3;
 
 export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
   const backgroundType = useBackgroundType();
@@ -131,13 +148,33 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
   }), [backgroundType, customColor, selectedImageSrc, gradientId, blurAmount, noiseAmount, borderRadius, paddingTop, paddingBottom, paddingLeft, paddingRight, shadow, windowFrame, frameStyle, layoutPreset, borderPreset, shadowPreset, showMockup, framePadding, frameOpacity, imageScale, imageOffsetX, imageOffsetY, sharpness, brightness, contrast, saturation]);
 
   const actions = editorActions;
-  
-  // These three used to be independent state, reset together from the top of the
-  // load effect whenever `imagePath` changed. Tagging them with the path they
-  // belong to gets the same reset by derivation — a new path is automatically
-  // not-yet-loaded and error-free — which removes the synchronous setState from
-  // the effect and, more importantly, the window in which a new capture could
-  // render using the *previous* capture's image.
+
+  // Per-capture list of source-image versions: the original capture, then one
+  // entry per crop.
+  //
+  // Crop is destructive, so the previous image has to be kept for undo to have
+  // anything to restore. The store tracks only the INDEX (see HistorySnapshot)
+  // because copying a multi-megabyte data URL into 50 history snapshots would
+  // be a memory leak — the images live here and are resolved on demand.
+  //
+  // Keyed BY CAPTURE rather than reset when the capture changes: ImageEditor
+  // stays mounted across captures (AGENTS.md Change 13), and keying means no
+  // reset effect is needed at all. A `sourceIndex` left over from a previous
+  // capture simply misses the new (shorter) list and falls back to the
+  // original image, and self-corrects on the first crop of the new capture.
+  const [sourcesByCapture, setSourcesByCapture] = useState<
+    Array<{ path: string; list: string[] }>
+  >([]);
+  const sourceIndex = useSourceIndex();
+  const sourceList = sourcesByCapture.find((e) => e.path === imagePath)?.list;
+  // Index 0 is the original capture by definition — see resolveSourcePath.
+  const sourcePath = resolveSourcePath(sourceList ?? [], sourceIndex, imagePath);
+
+  // Tagging the loaded image and its error with the path they belong to gets
+  // the "reset on new capture" behaviour by derivation — a new path is
+  // automatically not-yet-loaded and error-free — which removes the
+  // synchronous setState from the load effect and, more importantly, the
+  // window in which a new capture could render the PREVIOUS capture's image.
   const [loadedImage, setLoadedImage] = useState<{
     path: string;
     image: HTMLImageElement;
@@ -147,32 +184,33 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
     message: string;
   } | null>(null);
 
-  const screenshotImage =
-    loadedImage && loadedImage.path === imagePath ? loadedImage.image : null;
-  // `imageLoaded` was always set in lockstep with `screenshotImage`, so it is
-  // simply that, derived.
-  const imageLoaded = screenshotImage !== null;
-  const loadError = !imagePath
-    ? "No image path provided"
-    : reportedError && reportedError.path === imagePath
-      ? reportedError.message
-      : null;
-
-  const reportError = useCallback(
-    (message: string) => {
-      if (imagePath) setReportedError({ path: imagePath, message });
-    },
-    [imagePath]
-  );
-  
   const [isSaving, setIsSaving] = useState(false);
   const [isCopying, setIsCopying] = useState(false);
   const [tempDir, setTempDir] = useState<string>("/private/tmp");
 
-   const [selectedTool, setSelectedTool] = useState<ToolType>("select");
+  const [selectedTool, setSelectedTool] = useState<ToolType>("select");
   const [selectedAnnotation, setSelectedAnnotation] = useState<Annotation | null>(null);
-  
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  const screenshotImage =
+    loadedImage && loadedImage.path === sourcePath ? loadedImage.image : null;
+  // `imageLoaded` was always set in lockstep with `screenshotImage`, so it is
+  // simply that, derived.
+  const imageLoaded = screenshotImage !== null;
+  const loadError =
+    !sourcePath
+      ? null
+      : reportedError && reportedError.path === sourcePath
+        ? reportedError.message
+        : null;
+
+  const reportError = useCallback(
+    (message: string) => {
+      if (sourcePath) setReportedError({ path: sourcePath, message });
+    },
+    [sourcePath]
+  );
 
   const { previewUrl, error: previewError, renderHighQualityCanvas } = usePreviewGenerator({
     screenshotImage,
@@ -182,10 +220,159 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
     paddingBottom: settings.paddingBottom,
     paddingLeft: settings.paddingLeft,
     paddingRight: settings.paddingRight,
-    imagePath,
   });
 
   const error = loadError || previewError;
+
+  // ── Destructive crop ────────────────────────────────────────────────────
+  //
+  // The pending selection is stored in SOURCE IMAGE pixels — that is the space
+  // `cropCanvasToDataUrl` cuts in, so nothing has to round-trip back through
+  // frame coordinates when the crop is actually applied. The canvas works in
+  // frame coords, so the two are mapped at the boundary.
+  const [cropSelection, setCropSelection] = useState<CropRegion | null>(null);
+  const [cropSelectionFrame, setCropSelectionFrame] = useState<CropRegion | null>(null);
+  const [isCropping, setIsCropping] = useState(false);
+
+  const padding = useMemo(
+    () => ({ top: paddingTop, bottom: paddingBottom, left: paddingLeft, right: paddingRight }),
+    [paddingTop, paddingBottom, paddingLeft, paddingRight]
+  );
+
+  const imageContentRect: ImageContentRect | null = useMemo(
+    () => (screenshotImage ? getImageContentRect(screenshotImage, settings, padding) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mirror of the getFrameDimensions memo: these primitives plus `settings.crop`-free layout inputs are exactly what getImageContentRect reads.
+    [
+      screenshotImage,
+      settings.imageScale,
+      settings.layoutPreset,
+      settings.frameStyle,
+      settings.framePadding,
+      settings.windowFrame,
+      settings.showMockup,
+      settings.imageOffsetX,
+      settings.imageOffsetY,
+      paddingTop,
+      paddingBottom,
+      paddingLeft,
+      paddingRight,
+    ]
+  );
+
+  /** A finished drag, in frame coords -> normalize into source-image px. */
+  const handleCropSelect = useCallback(
+    (frameRect: CropRegion | null) => {
+      setCropSelectionFrame(frameRect);
+      if (!frameRect || !screenshotImage || !imageContentRect) {
+        setCropSelection(null);
+        return;
+      }
+      const topLeft = frameToImagePoint(imageContentRect, { x: frameRect.x, y: frameRect.y });
+      const bottomRight = frameToImagePoint(imageContentRect, {
+        x: frameRect.x + frameRect.width,
+        y: frameRect.y + frameRect.height,
+      });
+      setCropSelection(
+        normalizeSelection(
+          {
+            x: topLeft.x,
+            y: topLeft.y,
+            width: bottomRight.x - topLeft.x,
+            height: bottomRight.y - topLeft.y,
+          },
+          screenshotImage.width,
+          screenshotImage.height
+        )
+      );
+    },
+    [screenshotImage, imageContentRect]
+  );
+
+  /**
+   * Apply the selection: cut the pixels out of the source image and swap it in.
+   *
+   * The new image becomes the editor's source, which is the single input
+   * everything else derives from — so the frame, canvas, background, padding
+   * and every effect recompute around the SMALLER image automatically. That is
+   * what makes the background follow the crop instead of staying sized to the
+   * original.
+   */
+  const handleApplyCrop = useCallback(async () => {
+    if (!cropSelection || !screenshotImage || !imageContentRect) return;
+
+    const before = annotations.length;
+    const confirmed = window.confirm(
+      `Crop to ${Math.round(cropSelection.width)} \u00d7 ${Math.round(cropSelection.height)}?\n\nThe rest of the image is deleted. You can undo this with \u2318Z.`
+    );
+    if (!confirmed) return;
+
+    setIsCropping(true);
+    try {
+      const dataUrl = cropCanvasToDataUrl(
+        screenshotImage,
+        screenshotImage.width,
+        screenshotImage.height,
+        cropSelection
+      );
+
+      // Re-base annotations onto the surviving pixels before swapping.
+      // `getImageContentRect` is asked where the CROPPED image will land by
+      // passing it the cropped dimensions — same helper, same layout math the
+      // renderer uses, so the two cannot drift apart.
+      const nextRect = getImageContentRect(
+        { width: cropSelection.width, height: cropSelection.height },
+        settings,
+        padding
+      );
+      const rebased = rebaseAnnotationsForCrop(
+        annotations,
+        { x: imageContentRect.x, y: imageContentRect.y },
+        { x: nextRect.x, y: nextRect.y },
+        { width: nextRect.width, height: nextRect.height }
+      );
+      // ONE history entry must cover both the image swap and the re-based
+      // annotations, or a single Ctrl+Z would land in the middle of a crop.
+      //
+      // `setAnnotations` pushes its own snapshot, so history is paused around
+      // it; the snapshot that matters is pushed FIRST, while the store still
+      // holds the pre-crop source index and annotations.
+      actions.pushHistory();
+      if (rebased.length !== before) {
+        actions.pauseHistory();
+        try {
+          actions.setAnnotations(rebased);
+        } finally {
+          actions.resumeHistory();
+        }
+      }
+
+      // Drop the selection and hand the user back to the pointer tool.
+      // Without this the Crop tool stayed active after applying, leaving the
+      // bottom-bar Crop button on screen with nothing to apply.
+      setCropSelection(null);
+      setCropSelectionFrame(null);
+      setSelectedTool("select");
+
+      setSourcesByCapture((prev) => {
+        const next = prev.map((e) =>
+          e.path === imagePath ? { ...e, list: [...e.list, dataUrl] } : e
+        );
+        // Keep only the three most recent captures. Each entry holds a full
+        // base64 image, so keeping every capture for the life of the session
+        // would grow without bound.
+        const kept = next.some((e) => e.path === imagePath)
+          ? next
+          : [...next, { path: imagePath, list: [dataUrl] }];
+        return kept.slice(-MAX_SOURCE_CAPTURES);
+      });
+      // +1 because index 0 is reserved for the original capture.
+      actions.setSourceIndex((sourceList?.length ?? 0) + 1);
+    } catch (err) {
+      reportError(`Failed to crop: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setIsCropping(false);
+    }
+  }, [cropSelection, screenshotImage, imageContentRect, annotations, settings, padding, actions, reportError, sourceList, imagePath]);
 
   // Logical (full-resolution) frame size — what the composed image measures
   // BEFORE preview-tier scaling. Passed to AnnotationCanvas so the on-screen
@@ -201,7 +388,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
             right: paddingRight,
           })
         : null,
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `settings` is rebuilt every render; the primitive fields below are exactly the inputs getFrameDimensions reads (imageScale, layoutPreset, frameStyle, framePadding + the padding values passed explicitly).
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `settings` is rebuilt every render; the primitive fields below are exactly the inputs getFrameDimensions reads (imageScale, layoutPreset, frameStyle, framePadding, crop + the padding values passed explicitly).
     [
       screenshotImage,
       settings.imageScale,
@@ -245,20 +432,20 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
   useEffect(() => {
     // No reset block here: `screenshotImage`, `imageLoaded` and `loadError` are
     // all derived from `imagePath` above, so changing it resets them already.
-    if (!imagePath) {
+    if (!sourcePath) {
       return;
     }
 
     let isMounted = true;
 
     const setupImage = async () => {
-      let finalSrc = imagePath;
-      if (!imagePath.startsWith("data:") && !imagePath.startsWith("http:") && !imagePath.startsWith("https:")) {
+      let finalSrc = sourcePath;
+      if (!sourcePath.startsWith("data:") && !sourcePath.startsWith("http:") && !sourcePath.startsWith("https:")) {
         try {
-          finalSrc = await invoke<string>("read_file_as_base64", { path: imagePath });
+          finalSrc = await invoke<string>("read_file_as_base64", { path: sourcePath });
         } catch (err) {
           console.warn("Base64 read failed, falling back to convertFileSrc:", err);
-          finalSrc = convertFileSrc(imagePath);
+          finalSrc = convertFileSrc(sourcePath);
         }
       }
 
@@ -271,7 +458,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
 
       img.onload = async () => {
         if (!isMounted) return;
-        setLoadedImage({ path: imagePath, image: img });
+        setLoadedImage({ path: sourcePath, image: img });
 
         // Respect user-saved default padding — don't auto-change after "Set as Default"
         try {
@@ -294,7 +481,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
 
       img.onerror = () => {
         if (!isMounted) return;
-        reportError(`Failed to load image from: ${imagePath}`);
+        reportError(`Failed to load image from: ${sourcePath}`);
       };
 
       img.src = finalSrc;
@@ -305,24 +492,26 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
     return () => {
       isMounted = false;
     };
-  }, [imagePath, actions, reportError]);
+  }, [sourcePath, actions, reportError]);
 
   const handleSave = useCallback(async () => {
     if (!screenshotImage || isSaving || isCopying) return;
     
     setIsSaving(true);
     try {
-      const highQualityCanvas = await renderHighQualityCanvas(annotations, imagePath);
+      // Scale comes from export prefs so the composite renders at output size.
+      const prefs = await loadExportPrefs();
+      const highQualityCanvas = await renderHighQualityCanvas(annotations, sourcePath, {
+        outputScale: prefs.scale,
+      });
       
       if (!highQualityCanvas) {
         setIsSaving(false);
         return;
       }
 
-      // Format/quality/filename come from the user's export preferences
-      // (settings.json). The encoder's actual mime wins — WebKitGTK may fall
-      // back to PNG for a requested type it cannot encode.
-      const prefs = await loadExportPrefs();
+      // The encoder's actual mime wins — WebKitGTK may fall back to PNG for a
+      // requested type it cannot encode.
       const { dataUrl } = await canvasToDataUrl(highQualityCanvas, prefs);
       onSave(dataUrl, buildFilenameFromTemplate(prefs.filenameTemplate));
     } catch (err) {
@@ -330,14 +519,18 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
     } finally {
       setIsSaving(false);
     }
-  }, [screenshotImage, annotations, renderHighQualityCanvas, onSave, isSaving, isCopying, imagePath, reportError]);
+  }, [screenshotImage, annotations, renderHighQualityCanvas, onSave, isSaving, isCopying, sourcePath, reportError]);
 
   const handleCopy = useCallback(async () => {
     if (!screenshotImage || isSaving || isCopying) return;
     
     setIsCopying(true);
     try {
-      const highQualityCanvas = await renderHighQualityCanvas(annotations, imagePath);
+      // Clipboard copies are always PNG at logical 1x — format/scale prefs
+      // only affect files on disk.
+      const highQualityCanvas = await renderHighQualityCanvas(annotations, sourcePath, {
+        outputScale: 1,
+      });
       
       if (!highQualityCanvas) {
         setIsCopying(false);
@@ -365,7 +558,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
     } finally {
       setIsCopying(false);
     }
-  }, [screenshotImage, annotations, renderHighQualityCanvas, isSaving, isCopying, tempDir, imagePath, reportError]);
+  }, [screenshotImage, annotations, renderHighQualityCanvas, isSaving, isCopying, tempDir, sourcePath, reportError]);
 
   const handleAnnotationAdd = useCallback((annotation: Annotation) => {
     actions.addAnnotation(annotation);
@@ -509,6 +702,9 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
                   selectedTool={selectedTool}
                   previewUrl={previewUrl}
                   frameSize={frameDimensions}
+                  cropSelection={cropSelectionFrame}
+                  imageContentRect={imageContentRect ?? null}
+                  onCropSelect={handleCropSelect}
                   showTransparencyGrid={settings.backgroundType === "transparent"}
                   onAnnotationAdd={handleAnnotationAdd}
                   onAnnotationUpdate={handleAnnotationUpdate}
@@ -534,6 +730,25 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
           </div>
 
           <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1 bg-popover/90 backdrop-blur-xl px-1.5 py-1.5 rounded-full border border-border shadow-lg">
+            {/* Appears only once there is a selection to apply. Crop is
+                destructive, so it is never a default-visible action. */}
+            {cropSelection && (
+              <Button
+                variant="default"
+                onClick={handleApplyCrop}
+                disabled={isCropping || !imageLoaded}
+                className="h-8 rounded-full bg-primary text-primary-foreground hover:bg-primary/90 text-xs font-semibold px-5 disabled:opacity-50 shadow-sm"
+              >
+                {isCropping ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <>
+                    <Crop className="size-3.5" />
+                    Crop
+                  </>
+                )}
+              </Button>
+            )}
             <Button
               variant="ghost"
               onClick={onCancel}

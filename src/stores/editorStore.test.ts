@@ -249,3 +249,127 @@ describe("smart default padding calculation", () => {
     expect(calculatedPadding).toBe(10); // 200 * 0.05 = 10
   });
 });
+
+/**
+ * Crop is destructive — it swaps in a genuinely smaller image rather than
+ * hiding part of the old one — so a single undo has to restore BOTH the
+ * previous image and the annotations that belonged to it. These cover the
+ * sourceIndex half of that, which is the piece that was silently missing
+ * (undo restored settings/annotations but left the cropped image in place).
+ */
+describe("editorStore - source image history (crop undo)", () => {
+  beforeEach(() => {
+    act(() => {
+      editorActions.reset();
+    });
+  });
+
+  it("starts at the original capture", () => {
+    expect(useEditorStore.getState().sourceIndex).toBe(0);
+  });
+
+  it("undo restores the pre-crop source index", () => {
+    act(() => {
+      editorActions.pushHistory(); // snapshot at index 0, as a crop does
+      editorActions.setSourceIndex(1); // cropped image is now index 1
+    });
+    expect(useEditorStore.getState().sourceIndex).toBe(1);
+
+    act(() => {
+      editorActions.undo();
+    });
+    expect(useEditorStore.getState().sourceIndex).toBe(0);
+  });
+
+  it("redo re-applies the cropped source index", () => {
+    act(() => {
+      editorActions.pushHistory();
+      editorActions.setSourceIndex(1);
+      editorActions.undo();
+    });
+    expect(useEditorStore.getState().sourceIndex).toBe(0);
+
+    act(() => {
+      editorActions.redo();
+    });
+    expect(useEditorStore.getState().sourceIndex).toBe(1);
+  });
+
+  it("undo walks back through several crops in order", () => {
+    act(() => {
+      editorActions.pushHistory();
+      editorActions.setSourceIndex(1);
+      editorActions.pushHistory();
+      editorActions.setSourceIndex(2);
+    });
+    expect(useEditorStore.getState().sourceIndex).toBe(2);
+
+    act(() => {
+      editorActions.undo();
+    });
+    expect(useEditorStore.getState().sourceIndex).toBe(1);
+
+    act(() => {
+      editorActions.undo();
+    });
+    expect(useEditorStore.getState().sourceIndex).toBe(0);
+  });
+
+  it("a new source invalidates the redo branch", () => {
+    // The redo snapshots describe an image list the user has since diverged
+    // from, so replaying them would restore an image that no longer exists.
+    act(() => {
+      editorActions.pushHistory();
+      editorActions.setSourceIndex(1);
+      editorActions.undo();
+    });
+    expect(useEditorStore.getState().future.length).toBe(1);
+
+    act(() => {
+      editorActions.setSourceIndex(2);
+    });
+    expect(useEditorStore.getState().future.length).toBe(0);
+  });
+
+  it("reset returns to the original capture", () => {
+    act(() => {
+      editorActions.pushHistory();
+      editorActions.setSourceIndex(1);
+      editorActions.reset();
+    });
+    expect(useEditorStore.getState().sourceIndex).toBe(0);
+  });
+
+  it("restores annotations together with the source", () => {
+    const annotation = {
+      id: "a1",
+      type: "circle" as const,
+      x: 10,
+      y: 20,
+      radius: 5,
+      fill: { hex: "#fff", opacity: 100 },
+      border: { width: 0, color: { hex: "#fff", opacity: 100 } },
+      alignment: { horizontal: "left" as const, vertical: "top" as const },
+    };
+
+    // Mirrors how a crop actually applies: one pushHistory() FIRST (capturing
+    // the pre-crop source index and annotations), then the mutations with
+    // history paused so they do not each add a snapshot of their own.
+    act(() => {
+      editorActions.pushHistory();
+      editorActions.setSourceIndex(1);
+      editorActions.pauseHistory();
+      editorActions.setAnnotations([annotation]);
+      editorActions.resumeHistory();
+    });
+
+    act(() => {
+      editorActions.undo();
+    });
+
+    // Both halves revert together — this is the pairing that makes crop undo
+    // safe rather than just "annotations came back but the image did not".
+    expect(useEditorStore.getState().annotations).toHaveLength(0);
+    expect(useEditorStore.getState().sourceIndex).toBe(0);
+  });
+});
