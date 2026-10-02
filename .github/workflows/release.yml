@@ -239,6 +239,32 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
 
+      # Checksum the artifacts this job produced, for the in-app self-updater
+      # (which refuses to install any artifact with no published hash).
+      #
+      # Done here because the files are already on disk — hashing them in the
+      # publish job would mean re-downloading hundreds of MB through the API.
+      # `-b` produces the binary-mode `<hash> *<name>` format; the Rust parser
+      # strips the `*` (updater::parse_checksums).
+      - name: Checksum artifacts for self-updater
+        shell: bash
+        run: |
+          set -u
+          cd "${{ github.workspace }}/src-tauri/target/release/bundle" 2>/dev/null || exit 0
+          {
+            find . -type f \( -name '*.dmg' -o -name '*.deb' -o -name '*.rpm' -o -name '*.flatpak' -o -name '*-setup.exe' \) -print0 \
+              | xargs -0 -r sha256sum -b
+          } | sed 's#  \./#  #' > "$RUNNER_TEMP/checksums-${{ matrix.arch }}.txt"
+          echo "--- ${{ matrix.arch }} ---"
+          cat "$RUNNER_TEMP/checksums-${{ matrix.arch }}.txt"
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksums-${{ matrix.arch }}
+          path: ${{ runner.temp }}/checksums-${{ matrix.arch }}.txt
+          if-no-files-found: warn
+
   # ── Build Flatpak bundle (the universal Linux format) ──
   # Decoupled from publish: failure here will not block the deb/rpm/dmg
   # release. Flatpak is now the canonical install path for Linux because
@@ -458,6 +484,63 @@ jobs:
     runs-on: ubuntu-latest
     if: always() && needs.build.result == 'success'
     steps:
+      # Merge the per-job checksum fragments into one checksums.txt and attach
+      # it to the release. The in-app self-updater refuses to install an
+      # artifact with no published hash, so this must land before the release
+      # is published.
+      - name: Download checksum fragments
+        uses: actions/download-artifact@v4
+        with:
+          pattern: checksums-*
+          path: ${{ runner.temp }}/checksums
+          merge-multiple: true
+
+      - name: Attach checksums.txt to the release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const dir = path.join(process.env.RUNNER_TEMP, 'checksums');
+            const body = fs.existsSync(dir)
+              ? fs.readdirSync(dir)
+                  .filter(f => f.endsWith('.txt'))
+                  .map(f => fs.readFileSync(path.join(dir, f), 'utf8'))
+                  .join('')
+                  .split('\n')
+                  .filter(Boolean)
+                  .join('\n')
+              : '';
+
+            if (!body) {
+              core.warning('No checksum fragments found — self-update will refuse to install.');
+              return;
+            }
+            core.info(`checksums.txt:\n${body}`);
+
+            const tagName = context.ref.replace('refs/tags/', '');
+            // Draft releases are not returned by getReleaseByTag, so find the
+            // draft by scanning — same approach as the publish step below.
+            const { data: releases } = await github.rest.repos.listReleases({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const draft = releases.find(r => r.draft && r.tag_name === tagName);
+            if (!draft) {
+              core.warning(`No draft release for ${tagName} — skipping checksums.txt`);
+              return;
+            }
+
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: draft.id,
+              name: 'checksums.txt',
+              data: Buffer.from(body + '\n', 'utf8'),
+            });
+            core.info('Uploaded checksums.txt');
+
       - name: Publish Release
         uses: actions/github-script@v7
         with:
