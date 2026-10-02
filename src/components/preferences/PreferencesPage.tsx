@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Store } from "@tauri-apps/plugin-store";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowLeft, FileText, Folder, FolderOpen, Sliders, Image as ImageIcon, Keyboard, Info, Loader2, Check, Sparkles, Moon, Sun } from "lucide-react";
+import { ArrowLeft, FileText, Folder, FolderOpen, Sliders, Image as ImageIcon, Keyboard, Info, Loader2, Check, Sparkles, Moon, Sun, Power, EyeOff } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,6 +12,7 @@ import { KeyboardShortcutManager } from "./KeyboardShortcutManager";
 import type { KeyboardShortcut } from "./KeyboardShortcutManager";
 import { useTheme } from "@/hooks/useTheme";
 import { buildFilenameFromTemplate, DEFAULT_FILENAME_TEMPLATE, EXPORT_SCALES, type SaveFormat } from "@/lib/export-settings";
+import { getAutostartState, setAutostart } from "@/lib/autostart";
 import { cn } from "@/lib/utils";
 
 interface PreferencesPageProps {
@@ -41,11 +42,20 @@ export function PreferencesPage({ onBack, onSettingsChange }: PreferencesPagePro
     copyToClipboard: true,
     saveFormat: "png",
     saveQuality: 90,
+    saveScale: 1,
     filenameTemplate: DEFAULT_FILENAME_TEMPLATE,
   });
   // Draft quality for instant slider feedback; persisted on commit.
   const [quality, setQuality] = useState(90);
   const [isLoading, setIsLoading] = useState(true);
+  // Launch-at-login is owned by the OS, not by `settings.json`, so it is held
+  // separately from `GeneralSettings` and read back from Rust on mount.
+  const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  const [startHiddenToTray, setStartHiddenToTray] = useState(true);
+  // Set when the platform cannot report the state (locked-down desktop, or a
+  // build without the autostart plugin). The switches are disabled rather than
+  // shown as off, so "unknown" is never mistaken for "disabled".
+  const [autostartUnavailable, setAutostartUnavailable] = useState(false);
   const { theme, setTheme } = useTheme();
 
   // Load settings on mount
@@ -76,6 +86,18 @@ export function PreferencesPage({ onBack, onSettingsChange }: PreferencesPagePro
             ? Math.round(saveQuality)
             : 90
         );
+
+        // Read separately from the store: this is the OS registration, not a
+        // preference we own. A failure here must not block the rest of the
+        // page from loading.
+        try {
+          const autostart = await getAutostartState();
+          setLaunchAtLogin(autostart.enabled);
+          setStartHiddenToTray(autostart.startHidden);
+        } catch (err) {
+          console.error("Failed to read autostart state:", err);
+          setAutostartUnavailable(true);
+        }
       } catch (err) {
         console.error("Failed to load settings:", err);
       } finally {
@@ -101,6 +123,96 @@ export function PreferencesPage({ onBack, onSettingsChange }: PreferencesPagePro
     },
     [onSettingsChange]
   );
+
+  const applyAutostart = useCallback(
+    async (next: { enabled: boolean; startHidden: boolean }) => {
+      // Optimistic so the switch reacts on the same frame as the click; the
+      // OS state is authoritative and replaces it a moment later.
+      setLaunchAtLogin(next.enabled);
+      setStartHiddenToTray(next.startHidden);
+
+      try {
+        const actual = await setAutostart(next.enabled, next.startHidden);
+        setLaunchAtLogin(actual.enabled);
+        setStartHiddenToTray(actual.startHidden);
+
+        // The OS refused to register the app even though the call succeeded.
+        // Snapping the switch back is the only honest thing to show.
+        if (actual.enabled !== next.enabled) {
+          toast.error(
+            actual.enabled
+              ? "Could not turn off launch at login"
+              : "Could not enable launch at login"
+          );
+        } else {
+          toast.success(
+            actual.enabled
+              ? next.startHidden
+                ? "FrameXShot will start hidden in the tray at login"
+                : "FrameXShot will open at login"
+              : "Launch at login turned off"
+          );
+        }
+      } catch (err) {
+        console.error("Failed to update autostart:", err);
+        toast.error(
+          err instanceof Error ? err.message : "Failed to update launch at login"
+        );
+        // Re-read rather than guessing: the flag file is written before the OS
+        // call, so startHidden may genuinely have changed even though the
+        // enable/disable failed.
+        try {
+          const actual = await getAutostartState();
+          setLaunchAtLogin(actual.enabled);
+          setStartHiddenToTray(actual.startHidden);
+        } catch {
+          setLaunchAtLogin(!next.enabled);
+        }
+      }
+    },
+    []
+  );
+
+  const [update, setUpdate] = useState<UpdateCheck | null>(null);
+  const [isChecking, setIsChecking] = useState(false);
+  const [isInstalling, setIsInstalling] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+
+  const handleCheckForUpdate = useCallback(async () => {
+    setIsChecking(true);
+    setUpdateError(null);
+    try {
+      setUpdate(await checkForUpdate());
+    } catch (err) {
+      // Distinguish "could not check" from "up to date" — showing a confident
+      // "You're up to date" to someone who is offline is a lie.
+      setUpdate(null);
+      setUpdateError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsChecking(false);
+    }
+  }, []);
+
+  const handleInstallUpdate = useCallback(async () => {
+    const version = update?.latestVersion;
+    if (!version) return;
+
+    const confirmed = window.confirm(
+      `Install FrameXShot ${version}?\n\nThe app will close and reopen when it's done.`
+    );
+    if (!confirmed) return;
+
+    setIsInstalling(true);
+    setUpdateError(null);
+    try {
+      await installUpdate(version);
+      // The running process is still the old binary until this returns.
+      await relaunchApp();
+    } catch (err) {
+      setUpdateError(err instanceof Error ? err.message : String(err));
+      setIsInstalling(false);
+    }
+  }, [update]);
 
   const handleShortcutsChange = useCallback(
     (_shortcuts: KeyboardShortcut[]) => {
@@ -433,6 +545,71 @@ export function PreferencesPage({ onBack, onSettingsChange }: PreferencesPagePro
                       Light
                     </button>
                   </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Startup / Launch at login */}
+          {activeNav === "general" && (
+            <Card className="rounded-xl border border-border bg-card shadow-sm">
+              <CardHeader className="pb-3 border-b border-border/40">
+                <CardTitle className="text-sm font-semibold tracking-[-0.01em] text-foreground flex items-center gap-2">
+                  <Power className="size-4 text-accent" />
+                  Startup
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="pt-5 space-y-2">
+                <div className="flex items-center justify-between py-2">
+                  <div className="space-y-0.5 pr-4">
+                    <label
+                      htmlFor="launch-at-login"
+                      className="text-xs font-medium text-foreground cursor-pointer block"
+                    >
+                      Launch at login
+                    </label>
+                    <p className="text-[11px] text-muted-foreground">
+                      {autostartUnavailable
+                        ? "Unavailable — your system did not report a startup-app state"
+                        : "Start FrameXShot automatically when you sign in"}
+                    </p>
+                  </div>
+                  <Switch
+                    id="launch-at-login"
+                    checked={launchAtLogin}
+                    disabled={autostartUnavailable}
+                    onCheckedChange={(checked) =>
+                      applyAutostart({ enabled: checked, startHidden: startHiddenToTray })
+                    }
+                  />
+                </div>
+
+                <div
+                  className={cn(
+                    "flex items-center justify-between py-2 border-t border-border/30 pt-4 transition-opacity",
+                    !launchAtLogin && "opacity-50"
+                  )}
+                >
+                  <div className="space-y-0.5 pr-4">
+                    <label
+                      htmlFor="start-hidden"
+                      className="text-xs font-medium text-foreground flex items-center gap-2 cursor-pointer"
+                    >
+                      <EyeOff className="size-3.5 text-muted-foreground" aria-hidden="true" />
+                      Start hidden to tray
+                    </label>
+                    <p className="text-[11px] text-muted-foreground">
+                      At login, stay in the menu bar / tray instead of opening the window
+                    </p>
+                  </div>
+                  <Switch
+                    id="start-hidden"
+                    checked={startHiddenToTray}
+                    disabled={!launchAtLogin || autostartUnavailable}
+                    onCheckedChange={(checked) =>
+                      applyAutostart({ enabled: launchAtLogin, startHidden: checked })
+                    }
+                  />
                 </div>
               </CardContent>
             </Card>

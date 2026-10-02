@@ -28,17 +28,19 @@ mod ocr;
 mod overlay;
 mod screenshot;
 mod utils;
+use std::path::PathBuf;
 #[cfg(not(target_os = "linux"))]
 mod xcap_capture;
 
 use commands::{
     capture_all_monitors, capture_once, capture_region, capture_screen_for_selector,
     check_ocr_available, check_screen_capture_permission, cleanup_old_screenshots,
-    copy_image_file_to_clipboard, crop_and_save_region, get_desktop_directory, get_mouse_position,
-    get_temp_directory, move_window_to_active_space, native_capture_fullscreen,
+    copy_image_file_to_clipboard, crop_and_save_region, get_autostart_state, get_desktop_directory,
+    get_mouse_position, get_temp_directory, move_window_to_active_space, native_capture_fullscreen,
     native_capture_interactive, native_capture_ocr_region, native_capture_window,
     open_screen_capture_settings, perform_ocr_on_file, play_screenshot_sound, read_file_as_base64,
-    render_image_with_effects_rust, save_edited_image, select_folder_dialog, show_quick_overlay,
+    render_image_with_effects_rust, save_edited_image, select_folder_dialog, set_autostart,
+    show_quick_overlay,
 };
 
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -137,19 +139,25 @@ pub fn run() {
 
     builder
         .setup(|app| {
-            // Enable autostart by default
-            {
-                use tauri_plugin_autostart::ManagerExt;
-                let autostart_manager = app.autolaunch();
-                if !autostart_manager.is_enabled().unwrap_or(false) {
-                    let _ = autostart_manager.enable();
-                }
-            }
+            // Launch at login is opt-in and driven from Settings → General
+            // (`set_autostart`). This used to force-enable it on every launch,
+            // which registered the app with the OS behind the user's back and
+            // left no way to turn it off from inside the app.
 
             // Check CLI arguments for Hyprland / Wayland native keybindings
             let args: Vec<String> = std::env::args().collect();
             let app_handle = app.handle().clone();
-            let is_hidden = args.iter().any(|arg| arg == "--hidden");
+            let launched_hidden = args.iter().any(|arg| arg == "--hidden");
+            // The autostart registration always carries `--hidden` because the
+            // plugin bakes its args in at init and cannot rewrite them. Whether
+            // that hides the window is the user's choice, persisted alongside
+            // the toggle and read here — before the window is built, since
+            // `.visible()` is fixed at construction.
+            let start_hidden_on_login = crate::utils::read_autostart_prefs(
+                &app.path().app_config_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            )
+            .start_hidden;
+            let is_hidden = launched_hidden && start_hidden_on_login;
 
             // Create main window FIRST — must exist before we emit events into it.
             // (PR #3 fix: CLI capture flags were previously processed before window
@@ -364,7 +372,9 @@ pub fn run() {
             cleanup_old_screenshots,
             check_ocr_available,
             check_screen_capture_permission,
-            open_screen_capture_settings
+            open_screen_capture_settings,
+            get_autostart_state,
+            set_autostart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

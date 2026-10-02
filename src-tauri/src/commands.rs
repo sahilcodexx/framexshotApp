@@ -1062,3 +1062,87 @@ pub async fn perform_ocr_on_file(path: String) -> Result<String, String> {
     .map_err(|e| format!("Task join error: {}", e))??;
     Ok(recognized_text)
 }
+
+// --- Launch at login --------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct AutostartState {
+    /// Whether the OS will launch FrameXShot at login.
+    enabled: bool,
+    /// Whether a login launch starts hidden to the tray.
+    start_hidden: bool,
+}
+
+/// Read the current launch-at-login state.
+///
+/// `enabled` comes from the OS registration, not from our own settings, so a
+/// user who revokes autostart in their desktop's startup settings sees the
+/// toggle reflect that the next time they open Preferences.
+#[tauri::command]
+pub fn get_autostart_state(app_handle: AppHandle) -> Result<AutostartState, String> {
+    use tauri_plugin_autostart::ManagerExt;
+
+    let enabled = app_handle
+        .autolaunch()
+        .is_enabled()
+        .map_err(|e| format!("Failed to read autostart state: {}", e))?;
+    let start_hidden = crate::utils::read_autostart_prefs(&app_config_dir(&app_handle)).start_hidden;
+
+    Ok(AutostartState {
+        enabled,
+        start_hidden,
+    })
+}
+
+/// Enable or disable launching at login, and record whether a login launch
+/// should start hidden to the tray.
+///
+/// The `start_hidden` flag is written even while `enabled` is false, so
+/// toggling launch-at-login off and back on restores the previous choice
+/// instead of resetting it.
+#[tauri::command]
+pub fn set_autostart(
+    app_handle: AppHandle,
+    enabled: bool,
+    start_hidden: bool,
+) -> Result<AutostartState, String> {
+    use tauri_plugin_autostart::ManagerExt;
+
+    crate::utils::write_autostart_prefs(
+        &app_config_dir(&app_handle),
+        &crate::utils::AutostartPrefs { start_hidden },
+    )?;
+
+    let launcher = app_handle.autolaunch();
+    if enabled {
+        launcher
+            .enable()
+            .map_err(|e| format!("Failed to enable autostart: {}", e))?;
+    } else {
+        launcher
+            .disable()
+            .map_err(|e| format!("Failed to disable autostart: {}", e))?;
+    }
+
+    // Re-read rather than trusting the requested value: enabling can fail
+    // silently on locked-down desktops, and the toggle must show what the OS
+    // actually has registered.
+    let actual = launcher
+        .is_enabled()
+        .map_err(|e| format!("Failed to read autostart state: {}", e))?;
+
+    Ok(AutostartState {
+        enabled: actual,
+        start_hidden,
+    })
+}
+
+/// The app's config directory, falling back to an unusable-but-valid path so
+/// callers get a normal "could not read/write" error instead of a panic.
+pub fn app_config_dir(app_handle: &AppHandle) -> PathBuf {
+    app_handle
+        .path()
+        .app_config_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+

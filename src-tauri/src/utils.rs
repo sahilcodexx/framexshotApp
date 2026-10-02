@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub type AppResult<T> = Result<T, String>;
@@ -16,7 +16,7 @@ pub fn get_timestamp() -> AppResult<u64> {
         .map(|d| d.as_millis() as u64)
 }
 
-pub fn ensure_dir(path: &PathBuf) -> AppResult<()> {
+pub fn ensure_dir(path: &Path) -> AppResult<()> {
     fs::create_dir_all(path).map_err(|e| format!("Failed to create directory: {}", e))
 }
 
@@ -55,6 +55,65 @@ fn mime_for_path(path: &str) -> &'static str {
         "bmp" => "image/bmp",
         _ => "image/png",
     }
+}
+
+// --- Launch-at-login preferences -------------------------------------------
+//
+// The autostart plugin bakes its launch arguments into the OS registration at
+// plugin-init time and exposes no way to rewrite them afterwards, so the
+// registration always carries `--hidden`. Whether that actually *hides* the
+// window is therefore a separate, app-owned decision, persisted here and read
+// back in `setup()` before the main window is built.
+//
+// It lives in its own JSON file rather than in the frontend's `settings.json`
+// because the decision has to be made in Rust before the webview that owns that
+// store has even mounted.
+
+const AUTOSTART_FLAG_FILE: &str = "autostart.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct AutostartPrefs {
+    /// Start hidden to the tray when launched at login. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub start_hidden: bool,
+}
+
+/// Hand-written rather than derived: `#[derive(Default)]` would zero the field
+/// to `false`, silently overriding the `serde(default)` above and making a
+/// missing prefs file mean "show the window at login" instead of "stay hidden".
+impl Default for AutostartPrefs {
+    fn default() -> Self {
+        AutostartPrefs { start_hidden: true }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+pub fn autostart_flag_path(config_dir: &Path) -> PathBuf {
+    config_dir.join(AUTOSTART_FLAG_FILE)
+}
+
+/// Read the launch-at-login preferences, falling back to the defaults.
+///
+/// A missing file, malformed JSON or an unreadable directory all resolve to
+/// "start hidden" rather than an error: this runs on every app launch, before
+/// any window exists, and failing to start the app because a preferences file
+/// is corrupt would be far worse than showing the window.
+pub fn read_autostart_prefs(config_dir: &Path) -> AutostartPrefs {
+    fs::read_to_string(autostart_flag_path(config_dir))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<AutostartPrefs>(&raw).ok())
+        .unwrap_or_default()
+}
+
+pub fn write_autostart_prefs(config_dir: &Path, prefs: &AutostartPrefs) -> AppResult<()> {
+    ensure_dir(config_dir)?;
+    let json = serde_json::to_string_pretty(prefs)
+        .map_err(|e| format!("Failed to serialize autostart prefs: {}", e))?;
+    fs::write(autostart_flag_path(config_dir), json)
+        .map_err(|e| format!("Failed to write autostart prefs: {}", e))
 }
 
 const APP_TEMP_SUBDIR: &str = "framexshot";
@@ -293,6 +352,51 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&bystander);
+    }
+
+    #[test]
+    fn test_autostart_prefs_default_to_starting_hidden() {
+        let dir = TestDir::new("autostart_default");
+        let prefs = read_autostart_prefs(&dir.0);
+
+        assert!(
+            prefs.start_hidden,
+            "with no prefs file the app must start hidden, matching the --hidden arg"
+        );
+    }
+
+    #[test]
+    fn test_autostart_prefs_round_trip() {
+        let dir = TestDir::new("autostart_round_trip");
+        write_autostart_prefs(
+            &dir.0,
+            &AutostartPrefs {
+                start_hidden: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!read_autostart_prefs(&dir.0).start_hidden);
+    }
+
+    #[test]
+    fn test_autostart_prefs_survive_a_corrupt_file() {
+        let dir = TestDir::new("autostart_corrupt");
+        // A truncated write (app killed mid-save) must not stop the app from
+        // launching, and must not silently flip to "show the window on login".
+        fs::write(autostart_flag_path(&dir.0), b"{\"start_hidden\"").unwrap();
+
+        assert!(read_autostart_prefs(&dir.0).start_hidden);
+    }
+
+    #[test]
+    fn test_autostart_prefs_missing_key_defaults_to_hidden() {
+        let dir = TestDir::new("autostart_missing_key");
+        // An older version wrote `{}`-shaped objects; serde's `default` must
+        // fill the field in rather than zeroing it to false.
+        fs::write(autostart_flag_path(&dir.0), b"{}").unwrap();
+
+        assert!(read_autostart_prefs(&dir.0).start_hidden);
     }
 
     #[test]
