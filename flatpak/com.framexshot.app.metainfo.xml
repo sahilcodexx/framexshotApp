@@ -19,9 +19,9 @@
     </p>
   </description>
   <developer_name>sahil singh</developer_name>
-  <url type="homepage">https://github.com/sahilcodexx/framexshot</url>
-  <url type="bugtracker">https://github.com/sahilcodexx/framexshot/issues</url>
-  <url type="vcs-browser">https://github.com/sahilcodexx/framexshot</url>
+  <url type="homepage">https://github.com/sahilcodexx/framexshotApp</url>
+  <url type="bugtracker">https://github.com/sahilcodexx/framexshotApp/issues</url>
+  <url type="vcs-browser">https://github.com/sahilcodexx/framexshotApp</url>
   <launchable type="desktop-id">com.framexshot.app.desktop</launchable>
   <provides>
     <binary>framexshot</binary>
@@ -39,6 +39,16 @@
     <keyword>ocr</keyword>
   </keywords>
   <releases>
+    <release version="1.3.0" date="2026-10-02">
+      <description>
+        <p>Drawing and framing tools. Adds Pen and Highlighter freehand annotation tools, a Crop tool that permanently deletes the pixels outside the selection (with undo restoring the previous image, not just the annotations), and an export scale of 0.5x / 1x / 2x. Capture from the app window can now wait out a user-set countdown so there is time to open a menu first; hotkeys stay instant. Launch at login is now an opt-in setting with an explicit "start hidden to tray" choice, instead of being silently forced on. Portable installs can update from inside Settings -> About; every artifact is verified against the release SHA-256 before it is installed.</p>
+      </description>
+    </release>
+    <release version="1.2.0" date="2026-09-23">
+      <description>
+        <p>One-line macOS install and a Homebrew tap. Adds a universal install.sh that detects the OS, installs the matching DMG on macOS and builds from source on Linux, plus a cask that clears Gatekeeper automatically. Fixes the Linux build-from-source installer, which pointed at the old repository slug and 404'd for every user.</p>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-09-03">
       <description>
         <p>Re-adds the StyleSelector to the Border section in the right sidebar. Eight frame styles are now available: Plain, Frosted (light frosted-glass like iOS sheets), Smoky (dark smoky-glass), Glow (warm orange edge glow), Raised (soft white photo mat), Carved (dark recessed frame), Outline (thin white trace), and Frame (bold picture frame). When a non-default style is selected, padding and opacity sliders appear to fine-tune the look. The chosen style, padding, and opacity persist via the top-of-sidebar "Set as Default" button. Existing capture chain (grim/slurp/hyprctl on Hyprland) and Linux install paths (Arch .pkg.tar.zst GPG-signed, .deb, .rpm, .flatpak, .dmg, .exe) are unchanged.</p>

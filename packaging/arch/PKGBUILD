@@ -14,7 +14,7 @@
 #   packaging/aur/PKGBUILD
 
 pkgname=framexshot
-pkgver=1.1.0
+pkgver=1.3.0
 pkgrel=1
 pkgdesc="Beautiful, effortless screenshot tool for Linux — capture regions, screens, windows or text (OCR), then edit with frames, backgrounds, effects and annotations."
 arch=('x86_64' 'aarch64')

@@ -1,6 +1,9 @@
 cask "framexshot" do
-  version "1.2.0"
+  version "1.3.0"
 
+  # TODO(v1.3.0): these checksums are still the v1.2.0 DMGs. Refresh them from
+  # the published v1.3.0 assets (checksums.txt) before running
+  # `brew update && brew upgrade --cask framexshot` against this tap.
   on_arm do
     url "https://github.com/sahilcodexx/framexshotApp/releases/download/v#{version}/framexshot_#{version}_aarch64.dmg"
     sha256 "9b82f69914284ae0a93292743aae109f41bd3b11c09be8dbc0efedc6b7d642fa"

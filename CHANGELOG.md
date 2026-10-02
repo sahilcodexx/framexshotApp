@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-02
+
+**Drawing, cropping, an opt-in startup entry and self-update.** The editor gains Pen and Highlighter tools and a crop tool that really deletes pixels; the app stops registering itself with your desktop behind your back; and portable builds can update from inside Settings.
+
+### Editor
+
+- **Pen and Highlighter tools** — freehand strokes with width and opacity controls. Highlighter caps its own alpha at 0.45 and uses square caps so overlapping translucent segments do not darken into dots; Pen honours the opacity you pick. Strokes are smoothed with a quadratic curve through segment midpoints.
+- **Crop tool (destructive)** — pick Crop, drag a selection, confirm with the Crop button in the bottom bar. Everything outside the selection is deleted, producing a genuinely smaller image. Because that is irreversible at the pixel level, undo now restores the previous *image* as well as the previous annotations, so a crop → crop → undo → undo chain walks back correctly.
+  - Selections are clamped to the screenshot rect, so a stray drag cannot crop into the padding or the mockup frame.
+  - Crop geometry lives in `src/lib/crop-selection.ts` with unit tests, including the 36px mockup-header offset that would otherwise silently shift every selection upward.
+- **Export scale** — `0.5x` / `1x` / `2x` output multiplier in Settings → General.
+- **Sliders no longer draw tick marks by default**, which removes visual noise from every panel that uses them.
+
+### Capture
+
+- **Countdown delay for UI-triggered captures** — capture from the app window can wait out a user-set delay with a visible on-screen countdown, so you can open a menu or switch windows before the shutter fires. Global hotkeys stay instant by design: a multi-second wait after every keypress reads as the app hanging.
+
+### Startup
+
+- **Launch at login is now opt-in** (Settings → General → Startup). Previous versions registered the app as a startup app on every launch with no way to turn it off from inside the app.
+  - A separate **"Start hidden to tray"** switch decides what the login launch actually shows. The autostart registration always carries `--hidden` because the plugin bakes its arguments in at init; this switch is what makes the window appear or not.
+  - When the platform cannot report the registration state, the switches disable themselves rather than showing "off" — an unknown state must not be indistinguishable from a disabled one.
+
+### Updates
+
+- **In-app self-update for portable installs** (Settings → About). Checks GitHub for a newer release, verifies the artifact against the release's SHA-256, installs it and relaunches.
+  - Flatpak, system packages and Homebrew installs are detected and told which command to run instead — the app never overwrites itself behind a package manager's back.
+  - Windows self-update is not supported.
+- **Release CI now publishes `checksums.txt`** — each build job hashes its own bundle output and the publish job merges the per-arch files into the release before it goes live.
+
 ## [1.2.0] - 2026-09-23
 
 **One-line macOS install + Homebrew tap.** A universal installer script at the repo root, a Homebrew cask that clears Gatekeeper automatically, and a fix that made the Linux build-from-source installer 404 for every end user.
