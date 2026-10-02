@@ -27,6 +27,7 @@ mod ocr;
 #[cfg(not(target_os = "linux"))]
 mod overlay;
 mod screenshot;
+mod updater;
 mod utils;
 use std::path::PathBuf;
 #[cfg(not(target_os = "linux"))]
@@ -34,13 +35,13 @@ mod xcap_capture;
 
 use commands::{
     capture_all_monitors, capture_once, capture_region, capture_screen_for_selector,
-    check_ocr_available, check_screen_capture_permission, cleanup_old_screenshots,
-    copy_image_file_to_clipboard, crop_and_save_region, get_autostart_state, get_desktop_directory,
-    get_mouse_position, get_temp_directory, move_window_to_active_space, native_capture_fullscreen,
-    native_capture_interactive, native_capture_ocr_region, native_capture_window,
-    open_screen_capture_settings, perform_ocr_on_file, play_screenshot_sound, read_file_as_base64,
-    render_image_with_effects_rust, save_edited_image, select_folder_dialog, set_autostart,
-    show_quick_overlay,
+    check_for_update, check_ocr_available, check_screen_capture_permission,
+    cleanup_old_screenshots, copy_image_file_to_clipboard, crop_and_save_region, detect_install_method,
+    get_autostart_state, get_desktop_directory, get_mouse_position, get_temp_directory, install_update,
+    move_window_to_active_space, native_capture_fullscreen, native_capture_interactive,
+    native_capture_ocr_region, native_capture_window, open_screen_capture_settings, perform_ocr_on_file,
+    play_screenshot_sound, read_file_as_base64, relaunch_app, render_image_with_effects_rust,
+    save_edited_image, select_folder_dialog, set_autostart, show_quick_overlay,
 };
 
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -375,6 +376,10 @@ pub fn run() {
             open_screen_capture_settings,
             get_autostart_state,
             set_autostart,
+            check_for_update,
+            install_update,
+            relaunch_app,
+            detect_install_method
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

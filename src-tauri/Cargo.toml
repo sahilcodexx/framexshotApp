@@ -26,6 +26,11 @@ tauri-plugin-opener = "2"
 tauri-plugin-store = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
+# Self-updater HTTP client. `default-features = false` + `rustls-tls` keeps the
+# TLS backend pure Rust: native-tls would add a libssl-dev build dependency,
+# which the Flatpak manifest and the Arch package do not carry.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+sha2 = "0.10"
 xcap = { version = "0.8", default-features = false }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]

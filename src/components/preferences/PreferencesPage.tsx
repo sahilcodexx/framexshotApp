@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Store } from "@tauri-apps/plugin-store";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowLeft, FileText, Folder, FolderOpen, Sliders, Image as ImageIcon, Keyboard, Info, Loader2, Check, Sparkles, Moon, Sun, Power, EyeOff } from "lucide-react";
+import { ArrowLeft, FileText, Folder, FolderOpen, Sliders, Image as ImageIcon, Keyboard, Info, Loader2, Check, Sparkles, Moon, Sun, Power, EyeOff, Download, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,6 +13,7 @@ import type { KeyboardShortcut } from "./KeyboardShortcutManager";
 import { useTheme } from "@/hooks/useTheme";
 import { buildFilenameFromTemplate, DEFAULT_FILENAME_TEMPLATE, EXPORT_SCALES, type SaveFormat } from "@/lib/export-settings";
 import { getAutostartState, setAutostart } from "@/lib/autostart";
+import { checkForUpdate, installUpdate, relaunchApp, type UpdateCheck } from "@/lib/updater";
 import { cn } from "@/lib/utils";
 
 interface PreferencesPageProps {
@@ -731,6 +732,77 @@ export function PreferencesPage({ onBack, onSettingsChange }: PreferencesPagePro
                     <Check className="size-3.5 text-emerald-400" />
                     <span>High-Performance Canvas Rendering & GPU Accelerated Compositing.</span>
                   </div>
+                </div>
+
+                {/* Updates */}
+                <div className="pt-5 border-t border-border/30 space-y-3">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="space-y-0.5">
+                      <p className="text-xs font-medium text-foreground">Updates</p>
+                      <p className="text-[11px] text-muted-foreground">
+                        {update === null
+                          ? "Check whether a newer version is available"
+                          : update.updateAvailable
+                            ? `FrameXShot ${update.latestVersion} is available`
+                            : `You're on the latest version (${update.currentVersion})`}
+                      </p>
+                    </div>
+
+                    {update?.updateAvailable && update.canSelfUpdate ? (
+                      <Button
+                        type="button"
+                        variant="default"
+                        onClick={handleInstallUpdate}
+                        disabled={isInstalling}
+                        className="rounded-xl px-3.5 text-xs font-medium flex items-center gap-1.5 shrink-0"
+                      >
+                        {isInstalling ? (
+                          <Loader2 className="size-3.5 animate-spin" />
+                        ) : (
+                          <Download className="size-3.5" />
+                        )}
+                        {isInstalling ? "Installing…" : "Install"}
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={handleCheckForUpdate}
+                        disabled={isChecking || isInstalling}
+                        className="rounded-xl px-3.5 text-xs font-medium flex items-center gap-1.5 shrink-0"
+                      >
+                        {isChecking ? (
+                          <Loader2 className="size-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="size-3.5" />
+                        )}
+                        {isChecking ? "Checking…" : update?.updateAvailable ? "Re-check" : "Check"}
+                      </Button>
+                    )}
+                  </div>
+
+                  {/* A package manager owns this install — say so, rather than
+                      offering a self-update that the manager would undo. */}
+                  {update && !update.canSelfUpdate && (
+                    <div className="rounded-xl border border-border bg-secondary/50 px-3 py-2.5 space-y-1.5">
+                      <p className="text-[11px] text-muted-foreground">
+                        Installed via{" "}
+                        <span className="font-medium text-foreground">
+                          {update.installMethod.replace("_", " ")}
+                        </span>
+                        , which manages updates itself. Run:
+                      </p>
+                      <code className="block font-mono text-[11px] text-foreground bg-background border border-border rounded-lg px-2 py-1.5 overflow-x-auto">
+                        {update.manualUpdateHint}
+                      </code>
+                    </div>
+                  )}
+
+                  {updateError && (
+                    <p className="text-[11px] text-destructive">
+                      Could not check for updates: {updateError}
+                    </p>
+                  )}
                 </div>
               </CardContent>
             </Card>

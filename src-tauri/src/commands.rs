@@ -1146,3 +1146,79 @@ pub fn app_config_dir(app_handle: &AppHandle) -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
+// --- Self-update ------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct UpdateCheck {
+    current_version: String,
+    latest_version: Option<String>,
+    update_available: bool,
+    install_method: String,
+    can_self_update: bool,
+    manual_update_hint: Option<String>,
+    artifact_kind: String,
+}
+
+/// Ask GitHub whether a newer FrameXShot exists.
+///
+/// Runs on a blocking thread — it is a synchronous network call, and doing it
+/// on the async runtime would tie up a core for the whole round trip.
+#[tauri::command]
+pub async fn check_for_update(app_handle: AppHandle) -> Result<UpdateCheck, String> {
+    let current_version = app_handle.package_info().version.to_string();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = crate::updater::check_for_update(&current_version, 15)
+            .map_err(|e| format!("Task join error: {}", e))?;
+        Ok(UpdateCheck {
+            current_version: result.current_version,
+            latest_version: result.latest_version,
+            update_available: result.update_available,
+            install_method: serde_json::to_value(result.install_method)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "portable".to_string()),
+            can_self_update: result.can_self_update,
+            manual_update_hint: result.manual_update_hint,
+            artifact_kind: serde_json::to_value(result.artifact_kind)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "unknown".to_string()),
+        })
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
+/// Download, verify and install a release, then relaunch.
+///
+/// Refuses when a package manager owns this install (Flatpak / deb / rpm /
+/// Homebrew) — see `updater::InstallMethod::can_self_update`.
+#[tauri::command]
+pub async fn install_update(version: String, _app_handle: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::updater::download_and_install(&version, 600)
+            .map_err(|e| format!("Task join error: {}", e))
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
+/// Quit and start the app again — called after a successful install, because
+/// the running process is still the old binary.
+///
+/// `AppHandle::restart` is Tauri core, so this needs no `tauri-plugin-process`.
+/// It diverges (`-> !`), so the command never returns a success value.
+#[tauri::command]
+pub fn relaunch_app(app_handle: AppHandle) {
+    app_handle.restart();
+}
+
+/// How this copy of FrameXShot was installed, without contacting the network.
+#[tauri::command]
+pub fn detect_install_method() -> String {
+    serde_json::to_value(crate::updater::detect_install_method())
+        .ok()
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "portable".to_string())
+}
