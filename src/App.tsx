@@ -5,6 +5,7 @@ import { processScreenshotWithDefaultBackground } from "@/lib/auto-process";
 import { buildExportFilename } from "@/lib/export-settings";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
 import { isMac, isWindows } from "@/lib/platform";
+import { cn } from "@/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -168,17 +169,25 @@ function App() {
   // save directory and fail. Every read site is `tempDir || saveDir`, so an empty
   // string correctly falls back to the user's save directory instead.
   const [tempDir, setTempDir] = useState<string>("");
+  // Countdown before a capture triggered from the app UI. Lets the user open
+  // menus/tooltips first. Hotkeys stay instant — this is a deliberate choice,
+  // not an omission (see handleCapture).
+  const [captureDelay, setCaptureDelay] = useState(0);
+  // Visible countdown while a delayed capture is in flight.
+  const [countdownSeconds, setCountdownSeconds] = useState(0);
+  /** "ui" when triggered from the home page buttons, "hotkey" from global shortcuts. */
+  const activeCaptureSourceRef = useRef<"ui" | "hotkey">("ui");
 
   // Refs to hold current values for use in callbacks that may have stale closures
-  const settingsRef = useRef({ autoApplyBackground, saveDir, copyToClipboard, tempDir });
+  const settingsRef = useRef({ autoApplyBackground, saveDir, copyToClipboard, tempDir, captureDelay });
   const registeredShortcutsRef = useRef<Set<string>>(new Set());
   const lastCaptureTimeRef = useRef(0);
   const activeCaptureModeRef = useRef<CaptureMode>("region");
   
   // Keep ref in sync with state
   useEffect(() => {
-    settingsRef.current = { autoApplyBackground, saveDir, copyToClipboard, tempDir };
-  }, [autoApplyBackground, saveDir, copyToClipboard, tempDir]);
+    settingsRef.current = { autoApplyBackground, saveDir, copyToClipboard, tempDir, captureDelay };
+  }, [autoApplyBackground, saveDir, copyToClipboard, tempDir, captureDelay]);
 
   // Load settings function
   const loadSettings = useCallback(async () => {
@@ -210,6 +219,11 @@ function App() {
       const savedSaveDir = await store.get<string>("saveDir");
       if (savedSaveDir) {
         setSaveDir(savedSaveDir);
+      }
+
+      const savedCaptureDelay = await store.get<number>("captureDelay");
+      if (savedCaptureDelay !== null && savedCaptureDelay !== undefined) {
+        setCaptureDelay(savedCaptureDelay);
       }
 
       const savedShortcuts = await store.get<KeyboardShortcut[]>("keyboardShortcuts");
@@ -281,12 +295,14 @@ function App() {
           savedSaveDir,
           savedShortcuts,
           savedBackgroundImage,
+          savedCaptureDelay,
         ] = await Promise.all([
           store.get<boolean>("copyToClipboard"),
           store.get<boolean>("autoApplyBackground"),
           store.get<string>("saveDir"),
           store.get<KeyboardShortcut[]>("keyboardShortcuts"),
           store.get<string>("defaultBackgroundImage"),
+          store.get<number>("captureDelay"),
         ]);
 
         if (savedCopyToClip !== null && savedCopyToClip !== undefined) {
@@ -312,6 +328,10 @@ function App() {
 
         if (savedShortcuts && savedShortcuts.length > 0) {
           setShortcuts(savedShortcuts);
+        }
+
+        if (savedCaptureDelay !== null && savedCaptureDelay !== undefined) {
+          setCaptureDelay(savedCaptureDelay);
         }
 
         // Migrate legacy background image paths to asset IDs
@@ -393,13 +413,31 @@ function App() {
     const appWindow = getCurrentWindow();
 
     // Read current settings from ref to avoid stale closure issues
-    const { autoApplyBackground: shouldAutoApply, saveDir: currentSaveDir, copyToClipboard: shouldCopyToClipboard, tempDir: currentTempDir } = settingsRef.current;
+    const { autoApplyBackground: shouldAutoApply, saveDir: currentSaveDir, copyToClipboard: shouldCopyToClipboard, tempDir: currentTempDir, captureDelay: userDelaySeconds } = settingsRef.current;
+
+    // Countdown before the shutter fires. UI-initiated captures honor the
+    // user's delay; hotkeys stay instant — waiting 5s after pressing a
+    // hotkey would read as the app hanging, and hotkey users are the
+    // "capture right now" audience.
+    const delayMs = activeCaptureSourceRef.current === "ui" ? userDelaySeconds * 1000 : 0;
+    if (delayMs > 0) {
+      setCountdownSeconds(Math.ceil(delayMs / 1000));
+    }
 
     try {
       await appWindow.hide();
       // Capture Screen needs extra time for tray menu / window to fully hide, else it gets captured (see screenshot)
       const hideDelay = captureMode === "fullscreen" ? 400 : 100;
       await new Promise((resolve) => setTimeout(resolve, hideDelay));
+
+      if (delayMs > 0) {
+        // Tick the visible countdown once per second while waiting.
+        for (let remaining = Math.ceil(delayMs / 1000); remaining > 0; remaining--) {
+          setCountdownSeconds(remaining);
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+        setCountdownSeconds(0);
+      }
 
       if (captureMode === "ocr") {
         try {
@@ -625,6 +663,7 @@ function App() {
         }
       }
     } finally {
+      setCountdownSeconds(0);
       setIsCapturing(false);
     }
   }, [isCapturing]);
@@ -678,6 +717,7 @@ function App() {
               await register(hotkeyStr, (event) => {
                 // Only trigger on KeyDown/Pressed event to avoid double-triggers on KeyUp
                 if (!event || event.state === "Pressed" || !event.state) {
+                  activeCaptureSourceRef.current = "hotkey";
                   handleCaptureRef.current(action);
                 }
               });
@@ -696,6 +736,7 @@ function App() {
                 try {
                   await register(fallbackStr, (event) => {
                     if (!event || event.state === "Pressed" || !event.state) {
+                      activeCaptureSourceRef.current = "hotkey";
                       handleCaptureRef.current(action);
                     }
                   });
@@ -893,6 +934,18 @@ function App() {
   }, [loadSettings]);
 
   // Toggle auto-apply from main page
+  const handleCaptureDelayChange = useCallback(async (seconds: number) => {
+    setCaptureDelay(seconds);
+    try {
+      const store = await Store.load("settings.json");
+      await store.set("captureDelay", seconds);
+      await store.save();
+    } catch (err) {
+      console.error("Failed to save capture delay:", err);
+      toast.error("Failed to save setting");
+    }
+  }, []);
+
   const handleAutoApplyToggle = useCallback(async (checked: boolean) => {
     setAutoApplyBackground(checked);
     try {
@@ -1033,7 +1086,10 @@ function App() {
               </div>
               <div className="grid grid-cols-4 gap-2.5">
                 <button
-                  onClick={() => handleCapture("region")}
+                  onClick={() => {
+                    activeCaptureSourceRef.current = "ui";
+                    handleCapture("region");
+                  }}
                   disabled={isCapturing}
                   className="flex flex-col items-center justify-center p-3.5 gap-2 rounded-xl bg-card border border-border hover:bg-secondary hover:border-border active:scale-[0.98] transition-all duration-[var(--duration-fast)] ease-[var(--ease-smooth-out)] group disabled:opacity-50 cursor-pointer"
                 >
@@ -1047,7 +1103,10 @@ function App() {
                 </button>
 
                 <button
-                  onClick={() => handleCapture("ocr")}
+                  onClick={() => {
+                    activeCaptureSourceRef.current = "ui";
+                    handleCapture("ocr");
+                  }}
                   disabled={isCapturing}
                   className="flex flex-col items-center justify-center p-3.5 gap-2 rounded-xl bg-card border border-border hover:bg-secondary hover:border-border active:scale-[0.98] transition-all duration-[var(--duration-fast)] ease-[var(--ease-smooth-out)] group disabled:opacity-50 cursor-pointer"
                 >
@@ -1061,7 +1120,10 @@ function App() {
                 </button>
 
                 <button
-                  onClick={() => handleCapture("fullscreen")}
+                  onClick={() => {
+                    activeCaptureSourceRef.current = "ui";
+                    handleCapture("fullscreen");
+                  }}
                   disabled={isCapturing}
                   className="flex flex-col items-center justify-center p-3.5 gap-2 rounded-xl bg-card border border-border hover:bg-secondary hover:border-border active:scale-[0.98] transition-all duration-[var(--duration-fast)] ease-[var(--ease-smooth-out)] group disabled:opacity-50 cursor-pointer"
                 >
@@ -1075,7 +1137,10 @@ function App() {
                 </button>
 
                 <button
-                  onClick={() => handleCapture("window")}
+                  onClick={() => {
+                    activeCaptureSourceRef.current = "ui";
+                    handleCapture("window");
+                  }}
                   disabled={isCapturing}
                   className="flex flex-col items-center justify-center p-3.5 gap-2 rounded-xl bg-card border border-border hover:bg-secondary hover:border-border active:scale-[0.98] transition-all duration-[var(--duration-fast)] ease-[var(--ease-smooth-out)] group disabled:opacity-50 cursor-pointer"
                 >
@@ -1090,7 +1155,48 @@ function App() {
               </div>
             </div>
 
-            {isCapturing && (
+            {/* Capture delay stepper — countdown before UI-initiated captures.
+                Hotkeys stay instant by design. */}
+            <div className="flex items-center justify-between px-0.5">
+              <div className="space-y-0.5">
+                <span className="text-[11px] font-medium tracking-[-0.01em] text-muted-foreground uppercase">
+                  Capture delay
+                </span>
+                <p className="text-[10px] text-muted-foreground">
+                  Countdown before the shot — time to open menus. Hotkeys stay instant.
+                </p>
+              </div>
+              <div className="inline-flex items-center gap-1 rounded-full border border-border bg-secondary/60 p-1">
+                {[0, 3, 5, 10].map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => handleCaptureDelayChange(s)}
+                    aria-pressed={captureDelay === s}
+                    disabled={isCapturing}
+                    className={cn(
+                      "rounded-full px-2.5 py-1 text-[11px] font-medium tabular-nums transition-colors disabled:opacity-50",
+                      captureDelay === s
+                        ? "bg-foreground text-background"
+                        : "text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    {s === 0 ? "Off" : `${s}s`}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {isCapturing && countdownSeconds > 0 && (
+              <div className="flex items-center justify-center gap-2 py-1.5 text-foreground text-xs font-medium">
+                <span className="inline-flex size-6 items-center justify-center rounded-full bg-primary text-primary-foreground font-mono text-sm tabular-nums">
+                  {countdownSeconds}
+                </span>
+                Capturing in {countdownSeconds}s — get the screen ready
+              </div>
+            )}
+
+            {isCapturing && countdownSeconds === 0 && (
               <div className="flex items-center justify-center gap-2 py-1.5 text-accent text-xs font-medium">
                 <svg className="animate-spin size-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
