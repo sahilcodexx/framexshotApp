@@ -341,7 +341,11 @@ pub fn check_for_update(
 /// Lines of a `sha256sum`-style file: a 64-hex digest, whitespace, then the
 /// artifact file name.
 ///
-/// The release workflow emits one of these per artifact.
+/// The release workflow emits one of these per artifact, hashed in place, so
+/// the name arrives as a relative path (`dmg/framexshot_1.3.0_aarch64.dmg`,
+/// often with a `./` and binary-mode `*` prefix). Only the final segment is
+/// kept: it is what `verify_checksum` is asked about, and matching on the full
+/// path would depend on which directory the hashing happened to run in.
 pub fn parse_checksums(body: &str) -> Vec<(String, String)> {
     body.lines()
         .filter_map(|line| {
@@ -349,7 +353,9 @@ pub fn parse_checksums(body: &str) -> Vec<(String, String)> {
             let hash = parts.next()?;
             let name = parts.next()?;
             if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
-                Some((hash.to_ascii_lowercase(), name.trim_start_matches('*').to_string()))
+                let name = name.trim_start_matches('*');
+                let file_name = name.rsplit('/').next().unwrap_or(name);
+                Some((hash.to_ascii_lowercase(), file_name.to_string()))
             } else {
                 None
             }
@@ -408,6 +414,22 @@ mod checksum_tests {
         assert_eq!(parsed[0], (a, "framexshot_1.0.0_aarch64.dmg".to_string()));
         // Binary-mode `*` prefix is how sha256sum marks text mode; must be stripped.
         assert_eq!(parsed[1].1, "framexshot_1.0.0_x64.deb");
+    }
+
+    #[test]
+    fn test_parse_checksums_strips_the_hashed_directory_prefix() {
+        let a = "d".repeat(64);
+        // Exactly what the release workflow writes: binary-mode `*`, a `./`
+        // prefix and the bundle subdirectory the artifact lives in.
+        let body = format!(
+            "{} *./dmg/framexshot_1.3.0_aarch64.dmg\n{} *./deb/framexshot_1.3.0_amd64.deb\n",
+            a,
+            "e".repeat(64)
+        );
+        let parsed = parse_checksums(&body);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].1, "framexshot_1.3.0_aarch64.dmg");
+        assert_eq!(parsed[1].1, "framexshot_1.3.0_amd64.deb");
     }
 
     #[test]

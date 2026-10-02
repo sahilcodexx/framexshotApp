@@ -246,17 +246,51 @@ jobs:
       # publish job would mean re-downloading hundreds of MB through the API.
       # `-b` produces the binary-mode `<hash> *<name>` format; the Rust parser
       # strips the `*` (updater::parse_checksums).
+      #
+      # macOS runners are BSD userland: there is no `sha256sum` and no
+      # `xargs -r`, so the hash binary and the empty-input guard are both
+      # selected at runtime. `shasum -a 256 -b` emits the same binary-mode
+      # format as `sha256sum -b`.
       - name: Checksum artifacts for self-updater
         shell: bash
         run: |
           set -u
-          cd "${{ github.workspace }}/src-tauri/target/release/bundle" 2>/dev/null || exit 0
+          # A `--target <triple>` build (the Intel macOS job) writes its bundle
+          # to target/<triple>/release/bundle, not target/release/bundle, so
+          # both are checked. Skipping that job's directory used to "succeed"
+          # with an empty file and publish a DMG the updater then refuses to
+          # install, because it has no hash to verify against.
+          bundle_dir=""
+          for candidate in \
+            "${{ github.workspace }}"/src-tauri/target/release/bundle \
+            "${{ github.workspace }}"/src-tauri/target/*/release/bundle; do
+            if [ -d "$candidate" ]; then
+              bundle_dir="$candidate"
+              break
+            fi
+          done
+          if [ -z "$bundle_dir" ]; then
+            echo "::error::no bundle directory found — nothing was built"
+            exit 1
+          fi
+          cd "$bundle_dir"
+          if command -v sha256sum >/dev/null 2>&1; then
+            hash_cmd=(sha256sum -b)
+          else
+            hash_cmd=(shasum -a 256 -b)
+          fi
           {
-            find . -type f \( -name '*.dmg' -o -name '*.deb' -o -name '*.rpm' -o -name '*.flatpak' -o -name '*-setup.exe' \) -print0 \
-              | xargs -0 -r sha256sum -b
-          } | sed 's#  \./#  #' > "$RUNNER_TEMP/checksums-${{ matrix.arch }}.txt"
+            find . -type f \( -name '*.dmg' -o -name '*.deb' -o -name '*.rpm' -o -name '*.flatpak' -o -name '*-setup.exe' \) -print \
+              | while IFS= read -r file; do "${hash_cmd[@]}" "$file"; done
+          } | sed -E 's#^(.*) [*]?\./#\1  #' > "$RUNNER_TEMP/checksums-${{ matrix.arch }}.txt"
           echo "--- ${{ matrix.arch }} ---"
           cat "$RUNNER_TEMP/checksums-${{ matrix.arch }}.txt"
+          # A release with no checksums produces an updater that refuses to
+          # install anything, so fail the build instead of shipping it.
+          if [ ! -s "$RUNNER_TEMP/checksums-${{ matrix.arch }}.txt" ]; then
+            echo "::error::no artifacts matched — checksums would be empty"
+            exit 1
+          fi
 
       - name: Upload checksums
         uses: actions/upload-artifact@v4
