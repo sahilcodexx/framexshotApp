@@ -69,6 +69,15 @@ build() {
   fi
 
   pnpm install --frozen-lockfile
+
+  # Arch pins the system-wide linker to lld in /etc/cargo/config.toml
+  # (`rustflags = ["-C", "link-arg=-fuse-ld=lld"]`). lld does not rescan static
+  # archives, so the C objects inside the cc-built rlibs (ring, formerly
+  # aws-lc-sys) are never pulled in and the final link dies with hundreds of
+  # `undefined symbol: ring_core_*`. Exporting RUSTFLAGS replaces the config
+  # rustflags entirely, so pin GNU bfd (repeated archive scans) instead.
+  export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-fuse-ld=bfd"
+
   pnpm tauri build --no-bundle
 
   if ! strings "src-tauri/target/release/framexshot" | grep -q '/assets/index-'; then

@@ -625,6 +625,31 @@ EditorStore {
 - **Not covered**: real signing (minisign/GPG). SHA-256 over HTTPS catches corruption and truncation, not a compromised release account — which is also why the release pipeline already has a `GPG_PRIVATE_KEY` secret wired up for the Arch package, if this is ever worth escalating.
 - **REVERT**: delete `updater.rs`, the 4 commands, `lib/updater.ts`, the About card section, and the 2 checksum steps in `release.yml`; drop the reqwest/sha2 deps
 
+### Change 42: Portable release checksums (BSD userland + cross-targets)
+- **Files**: `.github/workflows/release.yml`, `src-tauri/src/updater.rs`
+- **Three stacked bugs** meant no artifact could ever verify on macOS:
+  1. macOS runners are BSD userland — the step shelled out to `sha256sum`, which does not exist (`xargs: sha256sum: No such file or directory`). Now picks the hash binary at runtime: `sha256sum -b` if present, else `shasum -a 256 -b`.
+  2. The Intel macOS job cross-compiles (`--target x86_64-apple-darwin`), so its bundle lives in `target/x86_64-apple-darwin/release/bundle`, not `target/release/bundle`. The old `cd … || exit 0` "succeeded" with an empty file. Now both locations are hashed, and a missing bundle dir or empty checksum file is a hard `exit 1`.
+  3. `sed 's#  \./#  #'` never matched — binary mode prints `hash *./name` — so checksums kept the `./dmg/…` prefix while `parse_checksums` compared against a bare filename. Path normalization now strips the hashed-directory prefix to `<hash>  <name>`.
+- **`parse_checksums` hardened**: each entry is reduced to its last path segment (`rsplit('/')`) so a `checksums.txt` in the wild can't break verification. Guarded by `test_parse_checksums_strips_the_hashed_directory_prefix`.
+- **Impact**: verified end-to-end on the published v1.3.0 — downloaded `framexshot_1.3.0_x64.dmg`, local sha256 matched the `checksums.txt` entry byte for byte.
+- **REVERT**: revert the checksum step in `release.yml` and the `rsplit('/')` in `parse_checksums`.
+
+### Change 43: Updater TLS on `ring` instead of `aws-lc-rs`
+- **Files**: `src-tauri/Cargo.toml`, `src-tauri/src/updater.rs`
+- **BEFORE**: `reqwest` with `rustls-no-provider` pulled in `aws-lc-rs` → `aws-lc-sys`, which compiles the full AWS-LC C library (cmake/nasm-class build). Heavy, and its prebuilt-symbol behavior differed across distros.
+- **AFTER**: explicit `rustls = { version = "0.23", default-features = false, features = ["ring"] }` and a single `http_client(timeout_secs)` helper that installs ring's crypto provider once via `static PROVIDER: Once` before building the client. All three former `reqwest::blocking::Client::builder()` call sites (`check_for_update`, the download fn, `run_installer`) go through it, so no call site can build a client before the provider is installed.
+- **Verified**: `cargo tree -i aws-lc-sys` matches nothing; `cargo tree -i ring` → ring 0.17.14 via rustls 0.23.45. `cargo build --release` and all 42 cargo tests pass.
+- **Note**: this was *not* the cause of the Arch link failure (Change 44) — the same error survived the provider switch.
+- **REVERT**: drop the `rustls` dep, delete `http_client`, restore the three `Client::builder()` call sites.
+
+### Change 44: Arch package links with GNU bfd (Arch pins the system linker to lld)
+- **Files**: `packaging/arch/PKGBUILD`, `packaging/aur/PKGBUILD`
+- **BEFORE**: the `arch` CI job failed at the final link with hundreds of `undefined symbol: aws_lc_0_45_0_*` (and, after Change 43, `ring_core_0_17_14__*`) — `OPENSSL_cpuid_setup`, `AES_set_encrypt_key`, `CBS_init`, … `linker 'x86_64-linux-gnu-gcc' failed … ld.lld: error: undefined symbol`.
+- **Root cause**: nothing in `release.yml` sets linker flags. Arch's system-wide `/etc/cargo/config.toml` pins rustflags to `-C link-arg=-fuse-ld=lld`, and the failing command line contains that exact flag. **lld does not rescan static archives**, so the C objects inside cc-built rlibs (`aws-lc-sys`, `ring`) are never pulled in and the link fails. Not a dependency-choice problem — every `cc`-built native static lib dies the same way, which is why the Change 43 provider swap did not help.
+- **AFTER**: `build()` exports `RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-fuse-ld=bfd"` before `pnpm tauri build --no-bundle`. An env `RUSTFLAGS` *replaces* config rustflags in cargo, so this both drops `-fuse-ld=lld` and stops Arch forcing `crt-static` (which Arch packaging guidelines want off for a GTK/WebKit app anyway). GNU bfd rescans archives until fixpoint, so the native objects resolve.
+- **REVERT**: delete the two `export RUSTFLAGS` lines from both PKGBUILDs.
+
 ---
 
 ## CSS Variable Reference (shadcn oklch)
