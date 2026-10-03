@@ -287,6 +287,32 @@ mod tests {
 
 /// Ask GitHub for the newest published release and compare it with this build.
 ///
+/// Build a blocking HTTP client with TLS.
+///
+/// rustls is compiled in with no default crypto provider (see Cargo.toml), so
+/// one must be installed before any TLS config exists or every TLS handshake
+/// fails at runtime with "no process-level CryptoProvider available".
+///
+/// `ring` is used rather than `aws-lc-rs` because aws-lc-sys is a C library: it
+/// needs a C toolchain to build and failed to link on Arch Linux under lld
+/// (undefined `aws_lc_0_45_0_*` symbols).
+fn http_client(timeout_secs: Option<u64>) -> AppResult<reqwest::blocking::Client> {
+    use std::sync::Once;
+    static PROVIDER: Once = Once::new();
+    PROVIDER.call_once(|| {
+        // Err only means some other provider won the race, which is fine.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+
+    let mut builder = reqwest::blocking::Client::builder().user_agent("FrameXShot-Updater");
+    if let Some(secs) = timeout_secs {
+        builder = builder.timeout(std::time::Duration::from_secs(secs));
+    }
+    builder
+        .build()
+        .map_err(|e| format!("Could not create HTTP client: {}", e))
+}
+
 /// Fails rather than reporting "up to date" when the network is unavailable —
 /// a silent false negative would read as "nothing to do" and hide a real
 /// update, so the caller must be able to tell the two apart.
@@ -296,11 +322,7 @@ pub fn check_for_update(
 ) -> AppResult<UpdateCheckResult> {
     let url = "https://api.github.com/repos/sahilcodexx/framexshotApp/releases/latest";
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .user_agent("FrameXShot-Updater")
-        .build()
-        .map_err(|e| format!("Could not create HTTP client: {}", e))?;
+    let client = http_client(Some(timeout_secs))?;
 
     let response = client
         .get(url)
@@ -527,11 +549,7 @@ pub fn download_and_install(
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
     let artifact_path = dir.join(&file_name);
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .user_agent("FrameXShot-Updater")
-        .build()
-        .map_err(|e| format!("Could not create HTTP client: {}", e))?;
+    let client = http_client(Some(timeout_secs))?;
 
     // Checksums first and small: fetch them BEFORE the artifact so a release
     // that does not publish a checksum for this file fails in seconds rather
@@ -622,10 +640,7 @@ fn run_installer(version: &str) -> AppResult<String> {
     // repo the running build came from — the same trust domain as the release.
     let script = std::env::temp_dir().join("framexshot-update").join("install.sh");
     if !script.exists() {
-        let client = reqwest::blocking::Client::builder()
-            .user_agent("FrameXShot-Updater")
-            .build()
-            .map_err(|e| format!("Could not create HTTP client: {}", e))?;
+        let client = http_client(None)?;
         let url = "https://raw.githubusercontent.com/sahilcodexx/framexshotApp/main/install.sh";
         download_to(&client, url, &script)?;
     }

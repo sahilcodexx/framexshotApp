@@ -26,10 +26,17 @@ tauri-plugin-opener = "2"
 tauri-plugin-store = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
-# Self-updater HTTP client. `default-features = false` + `rustls-tls` keeps the
-# TLS backend pure Rust: native-tls would add a libssl-dev build dependency,
-# which the Flatpak manifest and the Arch package do not carry.
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+# Self-updater HTTP client. `default-features = false` + `rustls-no-provider`
+# keeps the TLS backend pure Rust: native-tls would add a libssl-dev build
+# dependency, which the Flatpak manifest and the Arch package do not carry.
+#
+# "no provider" is deliberate. reqwest's plain `rustls` feature pulls in
+# aws-lc-rs, whose aws-lc-sys is a C library: it needs a C toolchain to build
+# and failed to LINK on Arch Linux (undefined aws_lc_0_45_0_* symbols under
+# lld). Selecting no provider lets us install `ring` instead, which has no such
+# problem — see updater::http_client.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 sha2 = "0.10"
 xcap = { version = "0.8", default-features = false }
 
