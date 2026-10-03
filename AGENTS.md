@@ -643,12 +643,16 @@ EditorStore {
 - **Note**: this was *not* the cause of the Arch link failure (Change 44) — the same error survived the provider switch.
 - **REVERT**: drop the `rustls` dep, delete `http_client`, restore the three `Client::builder()` call sites.
 
-### Change 44: Arch package links with GNU bfd (Arch pins the system linker to lld)
-- **Files**: `packaging/arch/PKGBUILD`, `packaging/aur/PKGBUILD`
-- **BEFORE**: the `arch` CI job failed at the final link with hundreds of `undefined symbol: aws_lc_0_45_0_*` (and, after Change 43, `ring_core_0_17_14__*`) — `OPENSSL_cpuid_setup`, `AES_set_encrypt_key`, `CBS_init`, … `linker 'x86_64-linux-gnu-gcc' failed … ld.lld: error: undefined symbol`.
-- **Root cause**: nothing in `release.yml` sets linker flags. Arch's system-wide `/etc/cargo/config.toml` pins rustflags to `-C link-arg=-fuse-ld=lld`, and the failing command line contains that exact flag. **lld does not rescan static archives**, so the C objects inside cc-built rlibs (`aws-lc-sys`, `ring`) are never pulled in and the link fails. Not a dependency-choice problem — every `cc`-built native static lib dies the same way, which is why the Change 43 provider swap did not help.
-- **AFTER**: `build()` exports `RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-fuse-ld=bfd"` before `pnpm tauri build --no-bundle`. An env `RUSTFLAGS` *replaces* config rustflags in cargo, so this both drops `-fuse-ld=lld` and stops Arch forcing `crt-static` (which Arch packaging guidelines want off for a GTK/WebKit app anyway). GNU bfd rescans archives until fixpoint, so the native objects resolve.
-- **REVERT**: delete the two `export RUSTFLAGS` lines from both PKGBUILDs.
+### Change 44: Arch package builds with the rustup toolchain, not Arch's rustc
+- **Files**: `.github/workflows/release.yml`
+- **BEFORE**: the `arch` CI job failed at the final link with hundreds of `undefined symbol: aws_lc_0_45_0_*` (and, after Change 43, `ring_core_0_17_14__*`) — `OPENSSL_cpuid_setup`, `AES_set_encrypt_key`, `CBS_init`, … `linker 'x86_64-linux-gnu-gcc' failed … undefined symbol`.
+- **Root cause: Arch's *packaged* rustc**, not the TLS provider and not the linker.
+  - Ruled out the dependency: switching `aws-lc-rs` → `ring` (Change 43) produced the *same class* of failure with a different symbol prefix, so every `cc`-built static lib was equally affected.
+  - Ruled out the linker: the failing command line contains `-fuse-ld=lld` (Arch's `/etc/cargo/config.toml` rustflags), and lld is known not to rescan archives. Forcing `-C link-arg=-fuse-ld=bfd` (GNU ld *does* rescan, until fixpoint) still failed with the identical undefined symbols — so the native objects never reach the linker at all, and the archive-rescan theory was wrong.
+  - Ruled out the flags: an upstream rustup 1.99.0 toolchain on CachyOS produces a link line with the *same* tail (`-fuse-ld=lld -Wl,--gc-sections -pie -Wl,-z,relro,-z,now -Wl,-O1 -Wl,--strip-all -nodefaultlibs`) and links successfully. Same rustc version, same gcc 16.2.1, same distro family — so the divergence is Arch's rust build.
+- **AFTER**: the `arch` job installs rustup + stable **as the `builder` user** and puts `/home/builder/.cargo/bin` on `PATH` for `build-package.sh`, matching every other build job (`dtolnay/rust-toolchain@stable`). `useradd`/`chown` moved into that step since the package build now runs under the same prepared user.
+- **REVERT**: drop the "Install Rust stable (rustup) for builder" step and put `useradd -m builder` / `chown -R builder:builder` back into the "Build Arch package" step.
+- **NOTE**: `packaging/aur/PKGBUILD` is unchanged and still builds with the distro rustc, so AUR users on a broken Arch rustc would hit the same link error. The AUR is not published (see Known Issues), so this is accepted for now; revisit if it's ever submitted.
 
 ---
 

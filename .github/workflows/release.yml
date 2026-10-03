@@ -450,11 +450,23 @@ jobs:
       - name: Resolve app version
         run: echo "APP_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      - name: Build Arch package
+      # The distro rustc (packaged by Arch) links the release binary into a
+      # state where the cc-built static libs bundled into rlibs (ring, formerly
+      # aws-lc-sys) are never resolved — the link dies with hundreds of
+      # `undefined symbol: ring_core_*`. Forcing GNU bfd instead of Arch's lld
+      # does NOT help, so the objects never make it into the link at all; the
+      # same rustc version from rustup (used by every other build job here)
+      # links fine. Build the package with the rustup toolchain instead.
+      - name: Install Rust stable (rustup) for builder
         run: |
           useradd -m builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
-          su builder -c "$GITHUB_WORKSPACE/packaging/arch/build-package.sh ${APP_VERSION}"
+          su builder -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable"
+          su builder -c "/home/builder/.cargo/bin/rustc --version && /home/builder/.cargo/bin/cargo --version"
+
+      - name: Build Arch package
+        run: |
+          su builder -c "PATH=/home/builder/.cargo/bin:\$PATH $GITHUB_WORKSPACE/packaging/arch/build-package.sh ${APP_VERSION}"
 
       - name: Validate Arch package
         run: test -f "framexshot_${{ env.APP_VERSION }}_x86_64.pkg.tar.zst"
