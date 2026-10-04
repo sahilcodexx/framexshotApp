@@ -5,6 +5,7 @@ import { Store } from "@tauri-apps/plugin-store";
 import { Accordion } from "./Accordion";
 import { RangeSliderDebounced } from "@/components/motion/range-slider-debounced";
 import { cn } from "@/lib/utils";
+import { paddingPercentToPx, paddingPxToPercent } from "@/lib/padding-slider";
 import { getAssetCategories, isDataUrl } from "@/lib/asset-registry";
 import { gradientOptions } from "./BackgroundSelector";
 import { BorderPresets } from "./BorderPresets";
@@ -328,17 +329,18 @@ const BackgroundSection = memo(function BackgroundSection({
     <div className="space-y-4">
       <RangeSliderDebounced
         label="Padding"
-        value={Math.round((paddingValue / 400) * 100)}
+        value={paddingPxToPercent(paddingValue)}
         format={(v) => `${v}%`}
         min={0}
         max={100}
-        // Padding updates per-pixel during drag — `usePreviewGenerator`
-        // throttles the canvas regen to 50ms (no effects) so the preview
-        // tracks the cursor instead of jumping once on release. The commit
-        // fires 150ms after the drag settles so undo history still sees
-        // one step per drag, not one per pixel.
-        onValueChangeTransient={actions.setAllPaddingTransient}
-        onValueCommit={(v) => actions.setAllPadding(Math.round((v / 100) * 400))}
+        // Slider units are 0–100%; the store and canvas use pixels (0–400).
+        // Transient and commit must convert the same way — passing the
+        // percent through as pixels made the live drag preview ~4× too
+        // small, then jump to the real padding 150ms after release.
+        onValueChangeTransient={(v) =>
+          actions.setAllPaddingTransient?.(paddingPercentToPx(v))
+        }
+        onValueCommit={(v) => actions.setAllPadding(paddingPercentToPx(v))}
         onDragChange={actions.setIsDragging}
         aria-label="Padding"
       />
