@@ -906,10 +906,19 @@ export function usePreviewGenerator({
 
       if (currentRenderId !== renderIdRef.current) return;
 
+      // Padding comes from the settings object being rendered, not the
+      // hook's last-render closure. The drag loop calls this with the
+      // latest pending settings; a closed-over padding value would freeze
+      // the preview at whatever padding the drag started with.
       const rendered = renderFullCanvas(
         screenshotImage,
         settingsToRender,
-        { top: paddingTop, bottom: paddingBottom, left: paddingLeft, right: paddingRight },
+        {
+          top: settingsToRender.paddingTop,
+          bottom: settingsToRender.paddingBottom,
+          left: settingsToRender.paddingLeft,
+          right: settingsToRender.paddingRight,
+        },
         bgImage,
         {
           renderEffects: shouldRenderEffects,
@@ -955,12 +964,11 @@ export function usePreviewGenerator({
         console.error("Preview generation failed:", err);
       }
     }
-  }, [screenshotImage, canvasRef, paddingTop, paddingBottom, paddingLeft, paddingRight]);
+  }, [screenshotImage, canvasRef]);
 
   // Keep the LATEST generatePreview reachable from store subscriptions and
-  // timers. A fresh closure is created whenever padding/screenshot changes,
-  // and the drag regen loop below must never call a stale one (stale padding
-  // = preview frozen at the value the drag started with).
+  // timers. Padding is read from the settings object passed in, so a stale
+  // closure cannot freeze the preview at the drag-start padding.
   const generatePreviewRef = useRef(generatePreview);
   useEffect(() => {
     generatePreviewRef.current = generatePreview;
@@ -1165,7 +1173,12 @@ export function usePreviewGenerator({
         const canvas = renderFullCanvas(
           screenshotImage,
           settings,
-          { top: paddingTop, bottom: paddingBottom, left: paddingLeft, right: paddingRight },
+          {
+            top: settings.paddingTop,
+            bottom: settings.paddingBottom,
+            left: settings.paddingLeft,
+            right: settings.paddingRight,
+          },
           bgImage,
           { renderEffects: true, outputScale }
         );
@@ -1199,7 +1212,7 @@ export function usePreviewGenerator({
         return null;
       }
     },
-    [screenshotImage, settings, paddingTop, paddingBottom, paddingLeft, paddingRight]
+    [screenshotImage, settings]
   );
 
   return {
