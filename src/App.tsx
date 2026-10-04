@@ -245,15 +245,6 @@ function App() {
   // Initial app setup
   useEffect(() => {
     const initializeApp = async () => {
-      // First get the desktop path as the default
-      let desktopPath = "";
-      try {
-        desktopPath = await invoke<string>("get_desktop_directory");
-      } catch (err) {
-        console.error("Failed to get Desktop directory:", err);
-        setError(`Failed to get Desktop directory: ${err instanceof Error ? err.message : String(err)}`);
-      }
-
       try {
         const systemTempDir = await invoke<string>("get_temp_directory");
         setTempDir(systemTempDir);
@@ -313,16 +304,17 @@ function App() {
           setAutoApplyBackground(savedAutoApply);
         }
 
-        // Only use saved directory if it's a non-empty string, otherwise use desktop
         if (savedSaveDir && savedSaveDir.trim() !== "") {
           setSaveDir(savedSaveDir);
         } else {
-          setSaveDir(desktopPath);
-          // Fire-and-forget the default-save so the first paint isn't
-          // gated on a disk write. If the write fails it's recoverable
-          // (next launch falls through this branch again).
-          if (desktopPath) {
-            void store.set("saveDir", desktopPath).then(() => store.save());
+          try {
+            const defaultDir = await invoke<string>("get_desktop_directory");
+            setSaveDir(defaultDir);
+            if (defaultDir) {
+              void store.set("saveDir", defaultDir).then(() => store.save());
+            }
+          } catch (err) {
+            console.warn("Failed to resolve default save directory:", err);
           }
         }
 
@@ -344,9 +336,13 @@ function App() {
         }
       } catch (err) {
         console.error("Failed to load settings:", err);
-        // Still set desktop as fallback
-        if (desktopPath) {
-          setSaveDir(desktopPath);
+        try {
+          const defaultDir = await invoke<string>("get_desktop_directory");
+          if (defaultDir) {
+            setSaveDir(defaultDir);
+          }
+        } catch (dirErr) {
+          console.warn("Failed to resolve default save directory:", dirErr);
         }
       }
     };

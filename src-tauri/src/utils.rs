@@ -4,9 +4,34 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub type AppResult<T> = Result<T, String>;
 
+fn usable_dir(path: Option<PathBuf>) -> Option<PathBuf> {
+    path.filter(|p| !p.as_os_str().is_empty())
+}
+
+fn default_save_dir_from(
+    desktop: Option<PathBuf>,
+    pictures: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(dir) = usable_dir(desktop) {
+        return Some(dir);
+    }
+    if let Some(dir) = usable_dir(pictures) {
+        return Some(dir);
+    }
+    let home = usable_dir(home)?;
+    let pictures_under_home = home.join("Pictures");
+    if pictures_under_home.as_os_str().is_empty() {
+        Some(home)
+    } else {
+        Some(pictures_under_home)
+    }
+}
+
 pub fn get_desktop_path() -> AppResult<String> {
-    let desktop = dirs::desktop_dir().ok_or("Failed to get Desktop directory")?;
-    Ok(desktop.to_string_lossy().into_owned())
+    default_save_dir_from(dirs::desktop_dir(), dirs::picture_dir(), dirs::home_dir())
+        .map(|p| p.to_string_lossy().into_owned())
+        .ok_or_else(|| "Failed to get Desktop directory".to_string())
 }
 
 pub fn get_timestamp() -> AppResult<u64> {
@@ -207,6 +232,67 @@ fn cleanup_images_in_dir(dir: &PathBuf, min_age: Duration) -> AppResult<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_save_dir_prefers_desktop() {
+        let desktop = PathBuf::from("/home/user/Desktop");
+        let pictures = PathBuf::from("/home/user/Pictures");
+        let home = PathBuf::from("/home/user");
+        assert_eq!(
+            default_save_dir_from(Some(desktop.clone()), Some(pictures), Some(home)),
+            Some(desktop)
+        );
+    }
+
+    #[test]
+    fn default_save_dir_falls_back_to_pictures() {
+        let pictures = PathBuf::from("/home/user/Pictures");
+        let home = PathBuf::from("/home/user");
+        assert_eq!(
+            default_save_dir_from(None, Some(pictures.clone()), Some(home)),
+            Some(pictures)
+        );
+    }
+
+    #[test]
+    fn default_save_dir_uses_pictures_under_home() {
+        let home = PathBuf::from("/home/user");
+        assert_eq!(
+            default_save_dir_from(None, None, Some(home.clone())),
+            Some(home.join("Pictures"))
+        );
+    }
+
+    #[test]
+    fn default_save_dir_none_when_all_missing() {
+        assert_eq!(default_save_dir_from(None, None, None), None);
+    }
+
+    #[test]
+    fn default_save_dir_treats_empty_path_as_missing() {
+        let pictures = PathBuf::from("/home/user/Pictures");
+        assert_eq!(
+            default_save_dir_from(Some(PathBuf::new()), Some(pictures.clone()), None),
+            Some(pictures)
+        );
+        let home = PathBuf::from("/home/user");
+        assert_eq!(
+            default_save_dir_from(
+                Some(PathBuf::new()),
+                Some(PathBuf::new()),
+                Some(home.clone())
+            ),
+            Some(home.join("Pictures"))
+        );
+        assert_eq!(
+            default_save_dir_from(
+                Some(PathBuf::new()),
+                Some(PathBuf::new()),
+                Some(PathBuf::new())
+            ),
+            None
+        );
+    }
 
     #[test]
     fn test_get_timestamp_returns_valid_value() {
