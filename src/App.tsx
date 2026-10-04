@@ -5,6 +5,7 @@ import { processScreenshotWithDefaultBackground } from "@/lib/auto-process";
 import { buildExportFilename } from "@/lib/export-settings";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
 import { isMac, isWindows } from "@/lib/platform";
+import { eventMatchesShortcut, isTypingTarget } from "@/lib/shortcut";
 import { cn } from "@/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -51,6 +52,13 @@ const DEFAULT_SHORTCUTS: KeyboardShortcut[] = [
   { id: "window", action: "Capture Window", shortcut: "CommandOrControl+Shift+D", enabled: false },
   { id: "ocr", action: "OCR Region", shortcut: "CommandOrControl+Shift+O", enabled: false },
 ];
+
+const CAPTURE_ACTION_BY_LABEL: Record<string, CaptureMode> = {
+  "Capture Region": "region",
+  "Capture Screen": "fullscreen",
+  "Capture Window": "window",
+  "OCR Region": "ocr",
+};
 
 function formatShortcut(shortcut: string): string {
   if (isMac) {
@@ -162,7 +170,11 @@ function App() {
   const [showOnboarding, setShowOnboarding] = useState(() => !hasCompletedOnboarding());
   const [shortcuts, setShortcuts] = useState<KeyboardShortcut[]>(DEFAULT_SHORTCUTS);
   const [enableGlobalHotkeys, setEnableGlobalHotkeys] = useState<boolean>(true);
+  // Default true: the window is focused on a normal launch, and we must not
+  // install an X11 key grab in that state (see the hotkey effect below).
+  const [windowFocused, setWindowFocused] = useState(true);
   const [settingsVersion, setSettingsVersion] = useState(0);
+  const [devLastKey, setDevLastKey] = useState<string | null>(null);
   // Empty until `get_temp_directory` resolves. It must NOT default to "/tmp":
   // that path does not exist on Windows, and a capture fired before init
   // completes (CLI flag / global shortcut) would pass it straight through as the
@@ -674,13 +686,67 @@ function App() {
     handleCaptureRef.current = handleCapture;
   }, [handleCapture]);
 
-  // Setup desktop global hotkeys
+  // Focus comes from Rust `WindowEvent::Focused`. JS `isFocused()`/`onFocusChanged`
+  // is unreliable on GTK/XWayland and was re-installing the X11 grab while the
+  // window still looked focused, so Ctrl+Shift+2 never reached the WebView.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let mounted = true;
+    void listen<boolean>("window-focus-changed", (event) => {
+      if (mounted) setWindowFocused(event.payload);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      mounted = false;
+      unlisten?.();
+    };
+  }, []);
+
+  // In-window shortcuts. The global-shortcut plugin is X11-only and does not
+  // fire while this window is focused (Hyprland/Wayland + XWayland grab).
+  // Match enabled bindings here so Ctrl+Shift+2 still starts a capture.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      if (isTypingTarget(e.target)) return;
+
+      for (const shortcut of shortcuts) {
+        if (!shortcut.enabled) continue;
+        const action = CAPTURE_ACTION_BY_LABEL[shortcut.action];
+        if (!action) continue;
+        if (!eventMatchesShortcut(e, shortcut.shortcut)) continue;
+
+        e.preventDefault();
+        e.stopPropagation();
+        activeCaptureSourceRef.current = "hotkey";
+        handleCaptureRef.current(action);
+        return;
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [shortcuts]);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const onKey = (e: KeyboardEvent) => {
+      setDevLastKey(
+        `${e.code}${e.ctrlKey ? " Ctrl" : ""}${e.shiftKey ? " Shift" : ""}${e.altKey ? " Alt" : ""}${e.metaKey ? " Super" : ""}`
+      );
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
+  // Setup desktop global hotkeys — only while the window is *not* focused.
   useEffect(() => {
     let active = true;
 
     const setupHotkeys = async () => {
       try {
-        if (!enableGlobalHotkeys) {
+        if (!enableGlobalHotkeys || windowFocused) {
           try {
             await unregisterAll();
           } catch {}
@@ -698,17 +764,10 @@ function App() {
         }
         registeredShortcutsRef.current.clear();
 
-        const actionMap: Record<string, CaptureMode> = {
-          "Capture Region": "region",
-          "Capture Screen": "fullscreen",
-          "Capture Window": "window",
-          "OCR Region": "ocr",
-        };
-
         for (const shortcut of shortcuts) {
           if (!shortcut.enabled || !active) continue;
 
-          const action = actionMap[shortcut.action];
+          const action = CAPTURE_ACTION_BY_LABEL[shortcut.action];
           if (action) {
             const hotkeyStr = shortcut.shortcut.trim();
             if (!hotkeyStr) continue;
@@ -781,7 +840,7 @@ function App() {
       }
       registered.clear();
     };
-  }, [shortcuts, enableGlobalHotkeys, settingsVersion]);
+  }, [shortcuts, enableGlobalHotkeys, settingsVersion, windowFocused]);
 
   useEffect(() => {
     let unlisten1: (() => void) | null = null;
@@ -1060,6 +1119,16 @@ function App() {
                 <span className="text-[11px] font-medium text-muted-foreground tracking-tight">
                   v{__APP_VERSION__}
                 </span>
+                {import.meta.env.DEV && (
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-primary border border-border rounded-full px-1.5 py-0.5">
+                    dev
+                  </span>
+                )}
+                {import.meta.env.DEV && devLastKey && (
+                  <span className="text-[10px] font-mono text-muted-foreground truncate max-w-[14rem]">
+                    key {devLastKey}
+                  </span>
+                )}
               </div>
 
               <div className="flex items-center gap-3">
