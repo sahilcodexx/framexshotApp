@@ -1491,6 +1491,7 @@ dependencies = [
  "arboard",
  "base64 0.22.1",
  "dirs 5.0.1",
+ "gtk",
  "image",
  "imageproc",
  "rand 0.8.6",
