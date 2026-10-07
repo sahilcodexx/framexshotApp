@@ -170,9 +170,18 @@ function App() {
   const [showOnboarding, setShowOnboarding] = useState(() => !hasCompletedOnboarding());
   const [shortcuts, setShortcuts] = useState<KeyboardShortcut[]>(DEFAULT_SHORTCUTS);
   const [enableGlobalHotkeys, setEnableGlobalHotkeys] = useState<boolean>(true);
-  // Default true: the window is focused on a normal launch, and we must not
-  // install an X11 key grab in that state (see the hotkey effect below).
-  const [windowFocused, setWindowFocused] = useState(true);
+  // Default FALSE, not true. The default must match the state we are most
+  // likely in before the first Rust `window-focus-changed` event arrives, and
+  // the app starts hidden-to-tray (launch-at-login default, Change 39) — in
+  // that state the window is NOT focused and global hotkeys must be armed.
+  // Initializing `true` left the grab uninstalled until the user opened and
+  // closed the main window once: Ctrl+Shift+2 was silently dead for the whole
+  // first hidden session. On a normal visible launch the false positive only
+  // means the X11 grab is installed while the window happens to be focused;
+  // the grab (owner_events=false) swallows the chord from the WebView then, so
+  // nothing double-fires, and the real Focused(true) event flips the state as
+  // soon as the window is shown.
+  const [windowFocused, setWindowFocused] = useState(false);
   const [settingsVersion, setSettingsVersion] = useState(0);
   const [devLastKey, setDevLastKey] = useState<string | null>(null);
   // Empty until `get_temp_directory` resolves. It must NOT default to "/tmp":
