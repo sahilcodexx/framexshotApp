@@ -5,6 +5,15 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      arch_only:
+        description: Rebuild only the Arch package for an existing release
+        type: boolean
+        default: false
+      release_version:
+        description: Existing release version for an Arch-only rebuild (e.g. 1.3.1)
+        type: string
+        required: false
 
 permissions:
   contents: write
@@ -16,6 +25,7 @@ concurrency:
 jobs:
   # ── Native packages: Linux (.deb + .rpm, x86_64 + arm64), Windows (NSIS), macOS (DMG) ──
   build:
+    if: ${{ !inputs.arch_only }}
     strategy:
       fail-fast: false
       matrix:
@@ -426,8 +436,8 @@ jobs:
   arch:
     needs: build
     runs-on: ubuntu-latest
-    continue-on-error: true
-    if: startsWith(github.ref, 'refs/tags/')
+    continue-on-error: ${{ !inputs.arch_only }}
+    if: ${{ always() && ((github.event_name == 'workflow_dispatch' && inputs.arch_only) || (startsWith(github.ref, 'refs/tags/') && needs.build.result == 'success')) }}
     container:
       image: archlinux:latest
     steps:
@@ -448,15 +458,26 @@ jobs:
             clang pkgconf
 
       - name: Resolve app version
-        run: echo "APP_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+        env:
+          ARCH_ONLY: ${{ inputs.arch_only }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "$ARCH_ONLY" = "true" ]; then
+            APP_VERSION="${RELEASE_VERSION#v}"
+            SOURCE_VERSION=$(node -p "require('./package.json').version")
+            if [ "$APP_VERSION" != "$SOURCE_VERSION" ]; then
+              echo "::error::Release version must match source version $SOURCE_VERSION"
+              exit 1
+            fi
+            gh release view "v${APP_VERSION}" --repo "${{ github.repository }}" --json tagName
+          else
+            APP_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          printf 'APP_VERSION=%s\n' "$APP_VERSION" >> "$GITHUB_ENV"
 
-      # The distro rustc (packaged by Arch) links the release binary into a
-      # state where the cc-built static libs bundled into rlibs (ring, formerly
-      # aws-lc-sys) are never resolved — the link dies with hundreds of
-      # `undefined symbol: ring_core_*`. Forcing GNU bfd instead of Arch's lld
-      # does NOT help, so the objects never make it into the link at all; the
-      # same rustc version from rustup (used by every other build job here)
-      # links fine. Build the package with the rustup toolchain instead.
+      # Match the toolchain used by the other release jobs. PKGBUILD disables
+      # makepkg's GCC LTO so native C objects can link with Rust's LLVM linker.
       - name: Install Rust stable (rustup) for builder
         run: |
           useradd -m builder
@@ -509,7 +530,7 @@ jobs:
             || { echo "ERROR: .sig file was not created" >&2; exit 1; }
 
       - name: Upload Arch package to release (best-effort)
-        continue-on-error: true
+        continue-on-error: ${{ !inputs.arch_only }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -517,10 +538,10 @@ jobs:
           if [ -f "framexshot_${{ env.APP_VERSION }}_x86_64.pkg.tar.zst.sig" ]; then
             ASSETS="$ASSETS framexshot_${{ env.APP_VERSION }}_x86_64.pkg.tar.zst.sig"
           fi
-          gh release upload "${{ github.ref_name }}" \
+          gh release upload "v${APP_VERSION}" \
             --repo "${{ github.repository }}" \
             $ASSETS \
-            --clobber || echo "Arch package upload failed; release was still published."
+            --clobber
 
   # ── Publish draft → public release ───────────────────────────────────────
   # Publishes as soon as the native build matrix succeeds. Flatpak is

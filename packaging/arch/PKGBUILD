@@ -16,6 +16,8 @@
 pkgname=framexshot
 pkgver=1.3.1
 pkgrel=1
+# GCC LTO archives cannot be consumed by Rust's LLVM linker.
+options=('!lto')
 pkgdesc="Beautiful, effortless screenshot tool for Linux — capture regions, screens, windows or text (OCR), then edit with frames, backgrounds, effects and annotations."
 arch=('x86_64' 'aarch64')
 url="https://github.com/sahilcodexx/framexshot"
