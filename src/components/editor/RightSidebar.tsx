@@ -5,7 +5,6 @@ import { Store } from "@tauri-apps/plugin-store";
 import { Accordion } from "./Accordion";
 import { RangeSliderDebounced } from "@/components/motion/range-slider-debounced";
 import { cn } from "@/lib/utils";
-import { paddingPercentToPx, paddingPxToPercent } from "@/lib/padding-slider";
 import { getAssetCategories, isDataUrl } from "@/lib/asset-registry";
 import { gradientOptions } from "./BackgroundSelector";
 import { BorderPresets } from "./BorderPresets";
@@ -323,26 +322,18 @@ const BackgroundSection = memo(function BackgroundSection({
     }
   };
 
-  const paddingValue = settings.paddingTop;
-
   return (
     <div className="space-y-4">
       <RangeSliderDebounced
-        label="Padding"
-        value={paddingPxToPercent(paddingValue)}
+        label="Image zoom"
+        value={Math.round(settings.imageScale * 100)}
         format={(v) => `${v}%`}
-        min={0}
-        max={100}
-        // Slider units are 0–100%; the store and canvas use pixels (0–400).
-        // Transient and commit must convert the same way — passing the
-        // percent through as pixels made the live drag preview ~4× too
-        // small, then jump to the real padding 150ms after release.
-        onValueChangeTransient={(v) =>
-          actions.setAllPaddingTransient?.(paddingPercentToPx(v))
-        }
-        onValueCommit={(v) => actions.setAllPadding(paddingPercentToPx(v))}
+        min={10}
+        max={200}
+        onValueChangeTransient={(v) => actions.setImageScaleTransient(v / 100)}
+        onValueCommit={(v) => actions.setImageScale(v / 100)}
         onDragChange={actions.setIsDragging}
-        aria-label="Padding"
+        aria-label="Image zoom"
       />
 
       <div
@@ -380,7 +371,7 @@ const BackgroundSection = memo(function BackgroundSection({
   );
 }, makeSettingsComparator(
   "backgroundType",
-  "paddingTop",
+  "imageScale",
   "selectedImageSrc",
   "customColor",
   "gradientId"
