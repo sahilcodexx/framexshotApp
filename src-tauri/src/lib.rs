@@ -36,12 +36,13 @@ mod xcap_capture;
 use commands::{
     capture_all_monitors, capture_once, capture_region, capture_screen_for_selector,
     check_for_update, check_ocr_available, check_screen_capture_permission,
-    cleanup_old_screenshots, copy_image_file_to_clipboard, crop_and_save_region, detect_install_method,
-    get_autostart_state, get_desktop_directory, get_mouse_position, get_temp_directory, install_update,
-    move_window_to_active_space, native_capture_fullscreen, native_capture_interactive,
-    native_capture_ocr_region, native_capture_window, open_screen_capture_settings, perform_ocr_on_file,
-    play_screenshot_sound, read_file_as_base64, relaunch_app, render_image_with_effects_rust,
-    save_edited_image, select_folder_dialog, set_autostart, show_quick_overlay,
+    cleanup_old_screenshots, copy_image_file_to_clipboard, crop_and_save_region,
+    detect_install_method, get_autostart_state, get_desktop_directory, get_mouse_position,
+    get_temp_directory, install_update, move_window_to_active_space, native_capture_fullscreen,
+    native_capture_interactive, native_capture_ocr_region, native_capture_window,
+    open_screen_capture_settings, perform_ocr_on_file, play_screenshot_sound, read_file_as_base64,
+    relaunch_app, render_image_with_effects_rust, save_edited_image, select_folder_dialog,
+    set_autostart, show_quick_overlay,
 };
 
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -297,7 +298,9 @@ pub fn run() {
             // the toggle and read here — before the window is built, since
             // `.visible()` is fixed at construction.
             let start_hidden_on_login = crate::utils::read_autostart_prefs(
-                &app.path().app_config_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                &app.path()
+                    .app_config_dir()
+                    .unwrap_or_else(|_| PathBuf::from(".")),
             )
             .start_hidden;
             let is_hidden = launched_hidden && start_hidden_on_login;
@@ -470,6 +473,7 @@ pub fn run() {
             capture_all_monitors,
             capture_region,
             save_edited_image,
+            commands::encode_avif,
             render_image_with_effects_rust,
             get_desktop_directory,
             get_temp_directory,

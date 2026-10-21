@@ -14,8 +14,7 @@ use crate::capture::{capture_region as capture_region_tool, has_binary};
 use crate::clipboard::{copy_image_to_clipboard, copy_text_to_clipboard};
 use crate::image::{
     copy_screenshot_to_dir, crop_image, render_image_with_effects, save_base64_image,
-    save_base64_image_named, CropRegion,
-    RenderSettings,
+    save_base64_image_named, CropRegion, RenderSettings,
 };
 use crate::ocr::recognize_text_from_image;
 #[cfg(not(target_os = "linux"))]
@@ -122,6 +121,8 @@ pub async fn save_edited_image(
     save_dir: String,
     copy_to_clip: bool,
     filename: Option<String>,
+    clipboard_image_data: Option<String>,
+    on_progress: tauri::ipc::Channel<String>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let saved_path = match filename.as_deref() {
@@ -131,12 +132,136 @@ pub async fn save_edited_image(
             _ => save_base64_image(&image_data, &save_dir, "framexshot")?,
         };
         if copy_to_clip {
-            copy_image_to_clipboard(&saved_path)?;
+            let _ = on_progress.send("clipboard".to_string());
+            if let Some(png) = clipboard_image_data {
+                let temp_dir = crate::utils::app_temp_dir()?;
+                let clipboard_path =
+                    save_base64_image(&png, &temp_dir.to_string_lossy(), "clipboard")?;
+                let result = copy_image_to_clipboard(&clipboard_path);
+                let _ = std::fs::remove_file(clipboard_path);
+                result.map_err(|e| {
+                    format!("Image saved to {}, but clipboard failed: {}", saved_path, e)
+                })?;
+            } else {
+                copy_image_to_clipboard(&saved_path).map_err(|e| {
+                    format!("Image saved to {}, but clipboard failed: {}", saved_path, e)
+                })?;
+            }
         }
         Ok(saved_path)
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvifProgress {
+    stage: &'static str,
+    estimated_seconds: Option<f64>,
+}
+
+fn encode_avif_pixels(
+    img: &image::RgbaImage,
+    quality: u8,
+    threads: usize,
+) -> Result<Vec<u8>, String> {
+    use image::ImageEncoder;
+    let mut output = Vec::new();
+    image::codecs::avif::AvifEncoder::new_with_speed_quality(&mut output, 10, quality)
+        .with_num_threads(Some(threads))
+        .write_image(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(output)
+}
+
+/// Encode AVIF natively because WebKit's canvas encoder does not support it.
+#[tauri::command]
+pub async fn encode_avif(
+    image_data: String,
+    quality: u8,
+    scale: Option<f64>,
+    on_progress: tauri::ipc::Channel<AvifProgress>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use base64::Engine;
+        static EXPORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = EXPORT_LOCK
+            .try_lock()
+            .map_err(|_| "An AVIF export is already running")?;
+        if !(1..=100).contains(&quality) {
+            return Err("Invalid export quality".to_string());
+        }
+        let payload = image_data
+            .strip_prefix("data:image/png;base64,")
+            .ok_or("Expected a PNG image")?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .map_err(|e| e.to_string())?;
+        drop(image_data);
+        let mut img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?
+            .into_rgba8();
+        drop(bytes);
+        let (width, height) =
+            crate::image::export_dimensions(img.width(), img.height(), scale.unwrap_or(1.0))?;
+        if (width, height) != img.dimensions() {
+            let _ = on_progress.send(AvifProgress {
+                stage: "resizing",
+                estimated_seconds: None,
+            });
+            img = image::imageops::resize(
+                &img,
+                width,
+                height,
+                image::imageops::FilterType::CatmullRom,
+            );
+        }
+        let threads = std::thread::available_parallelism()
+            .map(|count| count.get().saturating_sub(1).clamp(1, 4))
+            .unwrap_or(2);
+        let estimate = if u64::from(width) * u64::from(height) > 4_000_000 {
+            let _ = on_progress.send(AvifProgress {
+                stage: "estimating",
+                estimated_seconds: None,
+            });
+            let sample_w = width.min(768);
+            let sample_h = height.min(768);
+            let sample = image::imageops::crop_imm(
+                &img,
+                (width - sample_w) / 2,
+                (height - sample_h) / 2,
+                sample_w,
+                sample_h,
+            )
+            .to_image();
+            let started = std::time::Instant::now();
+            let _ = encode_avif_pixels(&sample, quality, threads)?;
+            Some(
+                started.elapsed().as_secs_f64() * (f64::from(width) * f64::from(height))
+                    / (f64::from(sample_w) * f64::from(sample_h))
+                    * 1.2,
+            )
+        } else {
+            None
+        };
+        let _ = on_progress.send(AvifProgress {
+            stage: "encoding",
+            estimated_seconds: estimate,
+        });
+        let output = encode_avif_pixels(&img, quality, threads)?;
+        Ok(format!(
+            "data:image/avif;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(output)
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Get the user's Desktop directory path
@@ -1086,7 +1211,8 @@ pub fn get_autostart_state(app_handle: AppHandle) -> Result<AutostartState, Stri
         .autolaunch()
         .is_enabled()
         .map_err(|e| format!("Failed to read autostart state: {}", e))?;
-    let start_hidden = crate::utils::read_autostart_prefs(&app_config_dir(&app_handle)).start_hidden;
+    let start_hidden =
+        crate::utils::read_autostart_prefs(&app_config_dir(&app_handle)).start_hidden;
 
     Ok(AutostartState {
         enabled,
@@ -1221,4 +1347,40 @@ pub fn detect_install_method() -> String {
         .ok()
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "portable".to_string())
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::encode_avif;
+    use base64::Engine;
+
+    #[test]
+    fn encodes_real_avif_and_rejects_invalid_quality() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let input = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+        );
+        assert!(tauri::async_runtime::block_on(encode_avif(
+            input.clone(),
+            0,
+            None,
+            tauri::ipc::Channel::new(|_| Ok(()))
+        ))
+        .is_err());
+        let output = tauri::async_runtime::block_on(encode_avif(
+            input,
+            90,
+            Some(3.0),
+            tauri::ipc::Channel::new(|_| Ok(())),
+        ))
+        .unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(output.strip_prefix("data:image/avif;base64,").unwrap())
+            .unwrap();
+        assert_eq!(&bytes[4..12], b"ftypavif");
+    }
 }
