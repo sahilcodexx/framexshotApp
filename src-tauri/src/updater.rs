@@ -174,10 +174,7 @@ fn is_newer(candidate: &str, current: &str) -> bool {
     }
 
     // Same numeric core: only a stable release supersedes its own pre-release.
-    match (c_pre, cur_pre) {
-        (false, true) => true,
-        _ => false,
-    }
+    matches!((c_pre, cur_pre), (false, true))
 }
 
 /// Pull the tag out of the GitHub `releases/latest` payload.
@@ -316,10 +313,7 @@ fn http_client(timeout_secs: Option<u64>) -> AppResult<reqwest::blocking::Client
 /// Fails rather than reporting "up to date" when the network is unavailable —
 /// a silent false negative would read as "nothing to do" and hide a real
 /// update, so the caller must be able to tell the two apart.
-pub fn check_for_update(
-    current_version: &str,
-    timeout_secs: u64,
-) -> AppResult<UpdateCheckResult> {
+pub fn check_for_update(current_version: &str, timeout_secs: u64) -> AppResult<UpdateCheckResult> {
     let url = "https://api.github.com/repos/sahilcodexx/framexshotApp/releases/latest";
 
     let client = http_client(Some(timeout_secs))?;
@@ -338,8 +332,7 @@ pub fn check_for_update(
         .text()
         .map_err(|e| format!("Could not read release info: {}", e))?;
 
-    let tag = extract_tag(&body)
-        .ok_or_else(|| "GitHub returned no release tag".to_string())?;
+    let tag = extract_tag(&body).ok_or_else(|| "GitHub returned no release tag".to_string())?;
     let latest = normalize_version(&tag);
 
     let method = detect_install_method();
@@ -347,11 +340,7 @@ pub fn check_for_update(
 
     Ok(UpdateCheckResult {
         current_version: current_version.to_string(),
-        latest_version: if update_available {
-            Some(latest)
-        } else {
-            None
-        },
+        latest_version: if update_available { Some(latest) } else { None },
         update_available,
         install_method: method,
         can_self_update: method.can_self_update(),
@@ -403,8 +392,8 @@ pub fn verify_checksum(
         .ok_or_else(|| format!("Release has no published checksum for {}", file_name))?;
 
     use sha2::{Digest, Sha256};
-    let bytes = std::fs::read(file)
-        .map_err(|e| format!("Failed to read downloaded file: {}", e))?;
+    let bytes =
+        std::fs::read(file).map_err(|e| format!("Failed to read downloaded file: {}", e))?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     let actual = hasher
@@ -430,7 +419,10 @@ mod checksum_tests {
     fn test_parse_checksums_reads_standard_format() {
         let a = "a".repeat(64);
         let b = "b".repeat(64);
-        let body = format!("{}  framexshot_1.0.0_aarch64.dmg\n{} *framexshot_1.0.0_x64.deb\n", a, b);
+        let body = format!(
+            "{}  framexshot_1.0.0_aarch64.dmg\n{} *framexshot_1.0.0_x64.deb\n",
+            a, b
+        );
         let parsed = parse_checksums(&body);
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0], (a, "framexshot_1.0.0_aarch64.dmg".to_string()));
@@ -457,10 +449,7 @@ mod checksum_tests {
     #[test]
     fn test_parse_checksums_skips_junk_lines() {
         let a = "c".repeat(64);
-        let body = format!(
-            "# comment\n\nnot-a-hash  file.dmg\n{}  good.dmg\n",
-            a
-        );
+        let body = format!("# comment\n\nnot-a-hash  file.dmg\n{}  good.dmg\n", a);
         let parsed = parse_checksums(&body);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].1, "good.dmg");
@@ -493,9 +482,12 @@ mod checksum_tests {
         let file = dir.join("artifact.dmg");
         std::fs::write(&file, b"payload").unwrap();
 
-        let err =
-            verify_checksum(&file, "artifact.dmg", &format!("{}  artifact.dmg\n", "a".repeat(64)))
-                .unwrap_err();
+        let err = verify_checksum(
+            &file,
+            "artifact.dmg",
+            &format!("{}  artifact.dmg\n", "a".repeat(64)),
+        )
+        .unwrap_err();
         assert!(err.contains("Checksum mismatch"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -523,10 +515,7 @@ mod checksum_tests {
 /// Refuses outright when a package manager owns the install (see
 /// [`InstallMethod::can_self_update`]) — this is the check that stops Flatpak
 /// and deb/rpm installs from being silently clobbered.
-pub fn download_and_install(
-    version: &str,
-    timeout_secs: u64,
-) -> AppResult<String> {
+pub fn download_and_install(version: &str, timeout_secs: u64) -> AppResult<String> {
     let method = detect_install_method();
     if !method.can_self_update() {
         return Err(format!(
@@ -581,7 +570,8 @@ fn artifact_file_name(version: &str, kind: ArtifactKind, arch: &str) -> AppResul
         // here would produce a 404 the user cannot act on.
         ArtifactKind::AppImage => {
             return Err(
-                "AppImage builds are not published — use the .deb or the Flatpak bundle".to_string(),
+                "AppImage builds are not published — use the .deb or the Flatpak bundle"
+                    .to_string(),
             )
         }
         ArtifactKind::FlatpakBundle => format!("framexshot_{}_{}.flatpak", version, arch),
@@ -621,8 +611,7 @@ fn download_to(
     // DMG is hundreds of MB.
     let mut file = std::fs::File::create(dest)
         .map_err(|e| format!("Failed to create {}: {}", dest.display(), e))?;
-    std::io::copy(&mut response, &mut file)
-        .map_err(|e| format!("Download failed: {}", e))?;
+    std::io::copy(&mut response, &mut file).map_err(|e| format!("Download failed: {}", e))?;
     file.flush().ok();
     Ok(())
 }
@@ -638,7 +627,9 @@ fn run_installer(version: &str) -> AppResult<String> {
 
     // install.sh is not vendored into the binary, so it is fetched from the
     // repo the running build came from — the same trust domain as the release.
-    let script = std::env::temp_dir().join("framexshot-update").join("install.sh");
+    let script = std::env::temp_dir()
+        .join("framexshot-update")
+        .join("install.sh");
     if !script.exists() {
         let client = http_client(None)?;
         let url = "https://raw.githubusercontent.com/sahilcodexx/framexshotApp/main/install.sh";
@@ -709,6 +700,9 @@ mod artifact_tests {
 
     #[test]
     fn test_current_arch_suffix_is_recognized() {
-        assert!(matches!(current_arch_suffix().unwrap().as_str(), "x64" | "aarch64"));
+        assert!(matches!(
+            current_arch_suffix().unwrap().as_str(),
+            "x64" | "aarch64"
+        ));
     }
 }
