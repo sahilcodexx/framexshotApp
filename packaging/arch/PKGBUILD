@@ -77,7 +77,22 @@ build() {
 
   # Must use `tauri build` — plain `cargo build` produces a ~15 MB binary
   # WITHOUT embedded frontend assets → blank WebKit window ("Operation was cancelled").
-  pnpm tauri build --no-bundle
+  env | grep -iE '^(CC|CXX|AR|ARFLAGS|AS|CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS|RUSTFLAGS|CARGO|MAKEFLAGS|OPT_LEVEL|TARGET|HOST|RUSTC|PATH)=' | sort
+  pnpm tauri build --no-bundle || {
+    echo "=== DIAG: ring rlib members ==="
+    for f in src-tauri/target/release/deps/libring-*.rlib; do
+      echo "--- $f"
+      ar t "$f" 2>&1 | head -15
+      echo "member count: $(ar t "$f" 2>/dev/null | wc -l)"
+    done
+    echo "=== DIAG: ring build out dir ==="
+    ls -la src-tauri/target/release/build/ring-*/out/ 2>&1 | head -20
+    echo "=== DIAG: native lib symbols ==="
+    for a in src-tauri/target/release/build/ring-*/out/*.a; do
+      echo "--- $a"; nm "$a" 2>/dev/null | grep -c "OPENSSL_cpuid_setup"
+    done
+    exit 1
+  }
 
   if ! strings "src-tauri/target/release/framexshot" | grep -q '/assets/index-'; then
     echo "ERROR: Frontend assets were not embedded into the release binary."
