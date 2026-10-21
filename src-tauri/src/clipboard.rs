@@ -19,17 +19,28 @@ fn has_binary(name: &str) -> bool {
 }
 
 /// Copy an image file to the system clipboard (Linux implementation).
-/// Tries xclip, then xsel, then wl-copy (Wayland).
+/// Tries wl-copy, xclip, then xsel, with a deadline for unresponsive clipboard tools.
 #[cfg(target_os = "linux")]
 pub fn copy_image_to_clipboard(image_path: &str) -> AppResult<()> {
     let image_bytes =
         std::fs::read(image_path).map_err(|e| format!("Failed to read image: {}", e))?;
 
+    let mime = match std::path::Path::new(image_path)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
+        Some("avif") => "image/avif",
+        Some("webp") => "image/webp",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        _ => "image/png",
+    };
+
     // wl-copy (Wayland)
     if has_binary("wl-copy") {
-        let mut child = Command::new("wl-copy")
+        let mut child = Command::new("timeout")
+            .args(["10s", "wl-copy"])
             .arg("--type")
-            .arg("image/png")
+            .arg(mime)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -44,6 +55,9 @@ pub fn copy_image_to_clipboard(image_path: &str) -> AppResult<()> {
         let status = child
             .wait()
             .map_err(|e| format!("Failed to wait for wl-copy: {}", e))?;
+        if status.code() == Some(124) {
+            return Err("Clipboard timed out after 10 seconds".to_string());
+        }
         if status.success() {
             return Ok(());
         }
@@ -51,11 +65,12 @@ pub fn copy_image_to_clipboard(image_path: &str) -> AppResult<()> {
 
     // xclip (X11)
     if has_binary("xclip") {
-        let mut child = Command::new("xclip")
+        let mut child = Command::new("timeout")
+            .args(["10s", "xclip"])
             .arg("-selection")
             .arg("clipboard")
             .arg("-t")
-            .arg("image/png")
+            .arg(mime)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -70,6 +85,9 @@ pub fn copy_image_to_clipboard(image_path: &str) -> AppResult<()> {
         let status = child
             .wait()
             .map_err(|e| format!("Failed to wait for xclip: {}", e))?;
+        if status.code() == Some(124) {
+            return Err("Clipboard timed out after 10 seconds".to_string());
+        }
         if status.success() {
             return Ok(());
         }
@@ -77,7 +95,8 @@ pub fn copy_image_to_clipboard(image_path: &str) -> AppResult<()> {
 
     // xsel (X11 fallback)
     if has_binary("xsel") {
-        let mut child = Command::new("xsel")
+        let mut child = Command::new("timeout")
+            .args(["10s", "xsel"])
             .arg("--clipboard")
             .arg("--input")
             .stdin(Stdio::piped())
@@ -94,6 +113,9 @@ pub fn copy_image_to_clipboard(image_path: &str) -> AppResult<()> {
         let status = child
             .wait()
             .map_err(|e| format!("Failed to wait for xsel: {}", e))?;
+        if status.code() == Some(124) {
+            return Err("Clipboard timed out after 10 seconds".to_string());
+        }
         if status.success() {
             return Ok(());
         }
@@ -108,7 +130,8 @@ pub fn copy_text_to_clipboard(text: &str) -> AppResult<()> {
     let bytes = text.as_bytes();
 
     if has_binary("wl-copy") {
-        let mut child = Command::new("wl-copy")
+        let mut child = Command::new("timeout")
+            .args(["10s", "wl-copy"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -123,13 +146,17 @@ pub fn copy_text_to_clipboard(text: &str) -> AppResult<()> {
         let status = child
             .wait()
             .map_err(|e| format!("Failed to wait for wl-copy: {}", e))?;
+        if status.code() == Some(124) {
+            return Err("Clipboard timed out after 10 seconds".to_string());
+        }
         if status.success() {
             return Ok(());
         }
     }
 
     if has_binary("xclip") {
-        let mut child = Command::new("xclip")
+        let mut child = Command::new("timeout")
+            .args(["10s", "xclip"])
             .arg("-selection")
             .arg("clipboard")
             .stdin(Stdio::piped())
@@ -146,6 +173,9 @@ pub fn copy_text_to_clipboard(text: &str) -> AppResult<()> {
         let status = child
             .wait()
             .map_err(|e| format!("Failed to wait for xclip: {}", e))?;
+        if status.code() == Some(124) {
+            return Err("Clipboard timed out after 10 seconds".to_string());
+        }
         if status.success() {
             return Ok(());
         }

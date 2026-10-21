@@ -100,11 +100,13 @@ fn decode_base64_image(image_data: &str) -> AppResult<(Vec<u8>, &'static str)> {
         (d, "jpg")
     } else if let Some(d) = image_data.strip_prefix("data:image/jpg;base64,") {
         (d, "jpg")
+    } else if let Some(d) = image_data.strip_prefix("data:image/avif;base64,") {
+        (d, "avif")
     } else if let Some(d) = image_data.strip_prefix("data:image/webp;base64,") {
         (d, "webp")
     } else {
         return Err(
-            "Invalid image data format: expected data:image/png;base64, data:image/jpeg;base64, or data:image/webp;base64, prefix"
+            "Invalid image data format: expected data:image/png;base64, data:image/jpeg;base64, data:image/webp;base64, or data:image/avif;base64, prefix"
                 .to_string(),
         );
     };
@@ -114,6 +116,16 @@ fn decode_base64_image(image_data: &str) -> AppResult<(Vec<u8>, &'static str)> {
         .map_err(|e| format!("Failed to decode base64: {}", e))?;
 
     Ok((bytes, extension))
+}
+
+/// Reject excessive allocations before resizing (same limit as the export dialog).
+pub fn export_dimensions(width: u32, height: u32, scale: f64) -> AppResult<(u32, u32)> {
+    let w = (f64::from(width) * scale).round();
+    let h = (f64::from(height) * scale).round();
+    if ![0.5, 1.0, 2.0, 3.0, 4.0].contains(&scale) || w < 1.0 || h < 1.0 || w * h > 100_000_000.0 {
+        return Err("This export is too large (maximum 100 megapixels). Choose a smaller scale or crop the screenshot.".to_string());
+    }
+    Ok((w as u32, h as u32))
 }
 
 /// Save base64-encoded image data to a file
@@ -133,7 +145,7 @@ pub fn save_base64_image(image_data: &str, save_dir: &str, prefix: &str) -> AppR
 
 /// Known image extensions, used to strip a user-supplied extension before the
 /// real one (from the encoded mime) is appended.
-const IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
+const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "avif"];
 
 /// Strip path separators, reserved characters and control bytes from a
 /// user-supplied filename base. Returns `None` when nothing usable is left.
@@ -164,13 +176,11 @@ pub fn save_base64_image_named(
 ) -> AppResult<String> {
     let (image_bytes, extension) = decode_base64_image(image_data)?;
 
-    let base = sanitize_filename_base(filename_base)
-        .ok_or_else(|| "Invalid filename".to_string())?;
+    let base =
+        sanitize_filename_base(filename_base).ok_or_else(|| "Invalid filename".to_string())?;
     // Drop a trailing extension (matching or not) — the encoded mime wins.
     let stem = match base.rsplit_once('.') {
-        Some((stem, ext))
-            if IMAGE_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)) =>
-        {
+        Some((stem, ext)) if IMAGE_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)) => {
             stem.to_string()
         }
         _ => base,
@@ -494,6 +504,22 @@ mod tests {
             assert_eq!(region.height, 1080);
             assert!(region.is_valid());
         }
+    }
+
+    #[test]
+    fn avif_payload_keeps_its_extension() {
+        let (bytes, extension) = decode_base64_image("data:image/avif;base64,YXZpZg==").unwrap();
+        assert_eq!(extension, "avif");
+        assert_eq!(bytes, b"avif");
+    }
+
+    #[test]
+    fn export_dimensions_validate_before_allocation() {
+        assert_eq!(export_dimensions(1200, 800, 3.0).unwrap(), (3600, 2400));
+        assert!(export_dimensions(10000, 10000, 4.0).is_err());
+        assert!(export_dimensions(0, 800, 1.0).is_err());
+        assert!(export_dimensions(100, 100, f64::NAN).is_err());
+        assert!(export_dimensions(100, 100, 1.5).is_err());
     }
 
     mod base64_validation {
