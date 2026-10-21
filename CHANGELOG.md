@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-21
+
+### Editor
+
+- Drag the screenshot within a fixed-size canvas; the image zoom control replaces canvas-resizing padding.
+- Reuse preview layers while dragging and commit position changes once on release, including undo support.
+- Center the editor's initial loading indicator.
+
+### Export
+
+- Add a custom export dialog with PNG, JPG, WebP and AVIF, quality controls, and 0.5x through 4x output sizes.
+- Show approximate time remaining based on output size, selected quality, measured encoder samples, and previous exports on the same machine.
+- Compose the frame once before upscaling; move AVIF resizing and encoding off the webview thread.
+- Optimize native codecs in dev builds, limit concurrent AVIF exports, and reject output above 100 megapixels before resizing.
+- Avoid unnecessary PNG clipboard encoding, bound Linux clipboard tool waits, and preserve edits after save failures.
+
 ### Capture
 
 - **CLI capture flags work when the app is already running.** A second launch of `framexshot --capture-region` (or `-r` / `--capture-screen` / `--capture-window` / `--capture-ocr`) used to only focus the main window because the single-instance plugin dropped `_args`. Hyprland binds such as `bind = $mainMod SHIFT, 2, exec, framexshot --capture-region` now start a capture the same way Tray → Capture Region does.

@@ -39,6 +39,11 @@
     <keyword>ocr</keyword>
   </keywords>
   <releases>
+    <release version="1.3.1" date="2026-10-21">
+      <description>
+        <p>Move screenshots freely inside a fixed canvas and adjust image zoom without resizing the frame. Export PNG, JPG, WebP or AVIF at up to 4x scale through a custom dialog with calibrated time estimates. Reduces export memory usage, bounds clipboard waits, centers loading indicators and fixes capture shortcuts when another instance is already running.</p>
+      </description>
+    </release>
     <release version="1.3.0" date="2026-10-02">
       <description>
         <p>Drawing and framing tools. Adds Pen and Highlighter freehand annotation tools, a Crop tool that permanently deletes the pixels outside the selection (with undo restoring the previous image, not just the annotations), and an export scale of 0.5x / 1x / 2x. Capture from the app window can now wait out a user-set countdown so there is time to open a menu first; hotkeys stay instant. Launch at login is now an opt-in setting with an explicit "start hidden to tray" choice, instead of being silently forced on. Portable installs can update from inside Settings -> About; every artifact is verified against the release SHA-256 before it is installed.</p>
