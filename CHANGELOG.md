@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Capture
+
+- **CLI capture flags work when the app is already running.** A second launch of `framexshot --capture-region` (or `-r` / `--capture-screen` / `--capture-window` / `--capture-ocr`) used to only focus the main window because the single-instance plugin dropped `_args`. Hyprland binds such as `bind = $mainMod SHIFT, 2, exec, framexshot --capture-region` now start a capture the same way Tray → Capture Region does.
+- **Ctrl+Shift+2 works while the app window is focused.** The X11 global-hotkey grab (`owner_events=false`) swallowed the chord from both the WebView and the grabber callback when FrameXShot had focus. The grab is now released on focus and the same bindings are handled as in-window shortcuts (matching `event.code` so Shift+2 is still `2`, not `@`).
+
 ## [1.3.0] - 2026-10-02
 
 **Drawing, cropping, an opt-in startup entry and self-update.** The editor gains Pen and Highlighter tools and a crop tool that really deletes pixels; the app stops registering itself with your desktop behind your back; and portable builds can update from inside Settings.

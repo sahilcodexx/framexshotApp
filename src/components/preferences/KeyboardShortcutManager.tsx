@@ -5,6 +5,7 @@ import { Plus, Trash2, Terminal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { isLinux, isMac } from "@/lib/platform";
+import { keyboardEventToShortcut } from "@/lib/shortcut";
 import { cn } from "@/lib/utils";
 
 export interface KeyboardShortcut {
@@ -48,56 +49,6 @@ function formatShortcut(shortcut: string): string {
     .replace(/Shift/g, "Shift+")
     .replace(/Alt|Option/g, "Alt+")
     .replace(/\+\+/g, "+");
-}
-
-// Convert a keyboard event to Tauri shortcut format
-function keyEventToShortcut(e: KeyboardEvent): string | null {
-  const parts: string[] = [];
-  
-  // Build modifier string
-  if (e.metaKey || e.ctrlKey) {
-    parts.push("CommandOrControl");
-  }
-  if (e.shiftKey) {
-    parts.push("Shift");
-  }
-  if (e.altKey) {
-    parts.push("Alt");
-  }
-  
-  // Get the key - ignore modifier-only presses
-  const key = e.key;
-  if (["Control", "Shift", "Alt", "Meta", "Command"].includes(key)) {
-    return null; // Still waiting for the main key
-  }
-  
-  const isFKey = key.startsWith("F") && !isNaN(parseInt(key.slice(1)));
-
-  // Need at least one modifier for a valid shortcut (unless F-key)
-  if (parts.length === 0 && !isFKey) {
-    return null;
-  }
-  
-  // Convert key to proper format
-  let keyName = key.toUpperCase();
-  
-  // Handle special keys
-  if (key === " ") keyName = "Space";
-  else if (key === "ArrowUp") keyName = "Up";
-  else if (key === "ArrowDown") keyName = "Down";
-  else if (key === "ArrowLeft") keyName = "Left";
-  else if (key === "ArrowRight") keyName = "Right";
-  else if (key === "Escape") keyName = "Escape";
-  else if (key === "Enter") keyName = "Enter";
-  else if (key === "Tab") keyName = "Tab";
-  else if (key === "Backspace") keyName = "Backspace";
-  else if (key === "Delete") keyName = "Delete";
-  else if (key.length === 1) keyName = key.toUpperCase();
-  else if (isFKey) keyName = key;
-  
-  parts.push(keyName);
-  
-  return parts.join("+");
 }
 
 export function KeyboardShortcutManager({ onShortcutsChange }: KeyboardShortcutManagerProps) {
@@ -185,7 +136,7 @@ export function KeyboardShortcutManager({ onShortcutsChange }: KeyboardShortcutM
         return;
       }
 
-      const shortcut = keyEventToShortcut(e);
+      const shortcut = keyboardEventToShortcut(e);
       if (shortcut) {
         recordedShortcutRef.current = shortcut;
         setRecordedShortcut(shortcut);

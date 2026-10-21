@@ -44,7 +44,107 @@ use commands::{
     save_edited_image, select_folder_dialog, set_autostart, show_quick_overlay,
 };
 
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+fn main_window_title() -> &'static str {
+    if cfg!(debug_assertions) {
+        "FrameXShot (dev)"
+    } else {
+        "FrameXShot"
+    }
+}
+
+/// Close-to-tray plus focus tracking. On focus we drop the X11 global-hotkey
+/// grab from a side thread (the plugin's `unregister_all` hops to the GTK
+/// main thread and would deadlock if called from this callback).
+fn wire_main_window_events(app: &tauri::AppHandle, window: &WebviewWindow) {
+    let window_clone = window.clone();
+    let app_handle = app.clone();
+    window.on_window_event(move |event| match event {
+        tauri::WindowEvent::CloseRequested { api, .. } => {
+            if let Err(e) = window_clone.hide() {
+                eprintln!("Failed to hide window: {}", e);
+            }
+            api.prevent_close();
+        }
+        tauri::WindowEvent::Focused(focused) => {
+            if *focused {
+                let app_for_unreg = app_handle.clone();
+                std::thread::spawn(move || {
+                    let _ = app_for_unreg.global_shortcut().unregister_all();
+                });
+            }
+            let _ = app_handle.emit("window-focus-changed", *focused);
+        }
+        _ => {}
+    });
+
+    #[cfg(target_os = "linux")]
+    attach_linux_in_window_shortcuts(app, window);
+}
+
+/// GTK sees Ctrl+Shift+2 even when WebKitGTK does not dispatch it to JS.
+#[cfg(target_os = "linux")]
+fn attach_linux_in_window_shortcuts(app: &tauri::AppHandle, window: &WebviewWindow) {
+    use gtk::gdk::ModifierType;
+    use gtk::prelude::*;
+
+    let gtk_win = match window.gtk_window() {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("gtk_window() failed, in-window shortcuts unavailable: {e}");
+            return;
+        }
+    };
+
+    fn is_region_shortcut(event: &gtk::gdk::EventKey) -> bool {
+        let state = event.state();
+        let ctrl = state.contains(ModifierType::CONTROL_MASK);
+        let shift = state.contains(ModifierType::SHIFT_MASK);
+        if !ctrl || !shift {
+            return false;
+        }
+        let name = event
+            .keyval()
+            .name()
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        matches!(name.as_str(), "2" | "at" | "quotedbl" | "dead_doubleacute")
+    }
+
+    fn emit_matching(app: &tauri::AppHandle, event: &gtk::gdk::EventKey) -> bool {
+        if !is_region_shortcut(event) {
+            return false;
+        }
+        let _ = app.emit("capture-triggered", ());
+        true
+    }
+
+    fn attach_to_widget(widget: &gtk::Widget, app: &tauri::AppHandle) {
+        let app_for_handler = app.clone();
+        widget.connect_key_press_event(move |_, event| {
+            if emit_matching(&app_for_handler, event) {
+                gtk::glib::Propagation::Stop
+            } else {
+                gtk::glib::Propagation::Proceed
+            }
+        });
+        if let Ok(container) = widget.clone().downcast::<gtk::Container>() {
+            // WebKit is often added after the GtkWindow exists, so also
+            // hook children that show up later.
+            let app_for_add = app.clone();
+            container.connect_add(move |_, child| {
+                attach_to_widget(child, &app_for_add);
+            });
+            for child in container.children() {
+                attach_to_widget(&child, app);
+            }
+        }
+    }
+
+    attach_to_widget(gtk_win.upcast_ref(), app);
+}
 
 fn show_main_window(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(window) = app.get_webview_window("main") {
@@ -52,7 +152,7 @@ fn show_main_window(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Er
         let _ = window.set_focus();
     } else {
         let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-            .title("FrameXShot")
+            .title(main_window_title())
             .inner_size(1200.0, 800.0)
             .min_inner_size(800.0, 600.0)
             .center()
@@ -60,17 +160,52 @@ fn show_main_window(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Er
             .decorations(false)
             .build()?;
 
-        let window_clone = window.clone();
-        window.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if let Err(e) = window_clone.hide() {
-                    eprintln!("Failed to hide window: {}", e);
-                }
-                api.prevent_close();
-            }
-        });
+        wire_main_window_events(app, &window);
     }
     Ok(())
+}
+
+/// Capture action requested via CLI (`--capture-region` / `-r`, etc.).
+/// Priority matches the original `if / else if` chain: region, then screen,
+/// then window, then OCR — independent of argv order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliCaptureAction {
+    Region,
+    Fullscreen,
+    Window,
+    Ocr,
+}
+
+fn parse_cli_capture_action<S: AsRef<str>>(args: &[S]) -> Option<CliCaptureAction> {
+    let has = |flag: &str, short: &str| {
+        args.iter()
+            .any(|arg| arg.as_ref() == flag || arg.as_ref() == short)
+    };
+
+    if has("--capture-region", "-r") {
+        Some(CliCaptureAction::Region)
+    } else if has("--capture-screen", "-s") {
+        Some(CliCaptureAction::Fullscreen)
+    } else if has("--capture-window", "-w") {
+        Some(CliCaptureAction::Window)
+    } else if has("--capture-ocr", "-o") {
+        Some(CliCaptureAction::Ocr)
+    } else {
+        None
+    }
+}
+
+/// Show the main window then emit the same events the tray menu uses.
+/// Hidden WebViews on some Wayland compositors drop IPC until shown.
+fn emit_cli_capture(app: &tauri::AppHandle, action: CliCaptureAction) {
+    let _ = show_main_window(app);
+    let event = match action {
+        CliCaptureAction::Region => "capture-triggered",
+        CliCaptureAction::Fullscreen => "capture-fullscreen",
+        CliCaptureAction::Window => "capture-window",
+        CliCaptureAction::Ocr => "capture-ocr",
+    };
+    let _ = app.emit(event, ());
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -122,8 +257,15 @@ pub fn run() {
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            let _ = show_main_window(app);
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Second launches (Hyprland bind, `framexshot --capture-region`,
+            // etc.) used to drop `_args` and only focus the main window.
+            match parse_cli_capture_action(&args) {
+                Some(action) => emit_cli_capture(app, action),
+                None => {
+                    let _ = show_main_window(app);
+                }
+            }
         }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_store::Builder::default().build())
@@ -165,7 +307,7 @@ pub fn run() {
             //  creation, causing "no window to receive event" race conditions.)
             let window =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                    .title("FrameXShot")
+                    .title(main_window_title())
                     .inner_size(1200.0, 800.0)
                     .min_inner_size(800.0, 600.0)
                     .center()
@@ -190,37 +332,12 @@ pub fn run() {
             .visible(false)
             .build();
 
-            // Now CLI capture flags - window exists, events will be received.
-            if args
-                .iter()
-                .any(|arg| arg == "--capture-region" || arg == "-r")
-            {
-                let _ = show_main_window(&app_handle);
-                let _ = app_handle.emit("capture-triggered", ());
-            } else if args
-                .iter()
-                .any(|arg| arg == "--capture-screen" || arg == "-s")
-            {
-                let _ = show_main_window(&app_handle);
-                let _ = app_handle.emit("capture-fullscreen", ());
-            } else if args
-                .iter()
-                .any(|arg| arg == "--capture-window" || arg == "-w")
-            {
-                let _ = show_main_window(&app_handle);
-                let _ = app_handle.emit("capture-window", ());
-            } else if args.iter().any(|arg| arg == "--capture-ocr" || arg == "-o") {
-                let _ = show_main_window(&app_handle);
-                let _ = app_handle.emit("capture-ocr", ());
+            // Now CLI capture flags — window exists, events will be received.
+            if let Some(action) = parse_cli_capture_action(&args) {
+                emit_cli_capture(&app_handle, action);
             }
 
-            let window_clone = window.clone();
-            window.on_window_event(move |event| {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    let _ = window_clone.hide();
-                    api.prevent_close();
-                }
-            });
+            wire_main_window_events(&app_handle, &window);
 
             // Region selector — borderless transparent overlay, moved and sized
             // to cover exactly one monitor at capture time by
@@ -383,4 +500,68 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_cli_capture_action, CliCaptureAction};
+
+    #[test]
+    fn parse_ignores_argv0_and_unrelated_flags() {
+        let args = ["framexshot", "--hidden"];
+        assert_eq!(parse_cli_capture_action(&args), None);
+    }
+
+    #[test]
+    fn parse_long_and_short_flags() {
+        assert_eq!(
+            parse_cli_capture_action(&["framexshot", "--capture-region"]),
+            Some(CliCaptureAction::Region)
+        );
+        assert_eq!(
+            parse_cli_capture_action(&["framexshot", "-r"]),
+            Some(CliCaptureAction::Region)
+        );
+        assert_eq!(
+            parse_cli_capture_action(&["framexshot", "--capture-screen"]),
+            Some(CliCaptureAction::Fullscreen)
+        );
+        assert_eq!(
+            parse_cli_capture_action(&["framexshot", "-s"]),
+            Some(CliCaptureAction::Fullscreen)
+        );
+        assert_eq!(
+            parse_cli_capture_action(&["framexshot", "--capture-window"]),
+            Some(CliCaptureAction::Window)
+        );
+        assert_eq!(
+            parse_cli_capture_action(&["framexshot", "-w"]),
+            Some(CliCaptureAction::Window)
+        );
+        assert_eq!(
+            parse_cli_capture_action(&["framexshot", "--capture-ocr"]),
+            Some(CliCaptureAction::Ocr)
+        );
+        assert_eq!(
+            parse_cli_capture_action(&["framexshot", "-o"]),
+            Some(CliCaptureAction::Ocr)
+        );
+    }
+
+    #[test]
+    fn parse_priority_is_region_then_screen_then_window_then_ocr() {
+        // Matches the original if/else-if chain, not argv order.
+        assert_eq!(
+            parse_cli_capture_action(&["--capture-ocr", "--capture-region"]),
+            Some(CliCaptureAction::Region)
+        );
+        assert_eq!(
+            parse_cli_capture_action(&["-s", "-w"]),
+            Some(CliCaptureAction::Fullscreen)
+        );
+        assert_eq!(
+            parse_cli_capture_action(&["-o", "--capture-window"]),
+            Some(CliCaptureAction::Window)
+        );
+    }
 }

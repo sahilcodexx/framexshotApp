@@ -50,6 +50,9 @@ tauri-plugin-dialog = "2"
 # SelectArea/ScreenshotArea. Pure Rust — already in the tree via xcap.
 zbus = "5"
 url = "2"
+# In-window Ctrl+Shift+2 while focused. WebKitGTK often swallows the chord
+# before JS keydown; a GTK key-press handler on the window/webview still sees it.
+gtk = "0.18"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # `wgc` switches xcap's Windows backend from the GDI path (BitBlt off the screen
