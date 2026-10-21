@@ -210,9 +210,8 @@ export function getFrameDimensions(
   const framePad = (settings.framePadding !== undefined && settings.framePadding >= 0)
     ? settings.framePadding
     : styleDef.padding;
-  const scale = settings.imageScale ?? 1.0;
-  const scaledWidth = Math.round(screenshotImage.width * scale);
-  const scaledHeight = Math.round(screenshotImage.height * scale);
+  const scaledWidth = screenshotImage.width;
+  const scaledHeight = screenshotImage.height;
   const extraX = Math.round(scaledWidth * extraFactor);
   const extraY = Math.round(scaledHeight * extraFactor);
   const frame = {
@@ -274,8 +273,8 @@ export function getImageContentRect(
   const width = Math.round(screenshotImage.width * scale);
   const height = Math.round(screenshotImage.height * scale);
 
-  const extraX = Math.round(width * extraFactor);
-  const extraY = Math.round(height * extraFactor);
+  const extraX = Math.round(screenshotImage.width * extraFactor);
+  const extraY = Math.round(screenshotImage.height * extraFactor);
 
   // The mockup title bar is drawn INSIDE the framed layer, above the image, so
   // the image content starts below it. Skipping this would shift every crop
@@ -287,8 +286,8 @@ export function getImageContentRect(
   const headerHeight = frameType === "none" ? 0 : 36;
 
   return {
-    x: padding.left + extraX + framePad + (settings.imageOffsetX ?? 0),
-    y: padding.top + extraY + framePad + (settings.imageOffsetY ?? 0) + headerHeight,
+    x: padding.left + extraX + framePad + (screenshotImage.width - width) / 2 + (settings.imageOffsetX ?? 0),
+    y: padding.top + extraY + framePad + (screenshotImage.height - height) / 2 + (settings.imageOffsetY ?? 0) + headerHeight,
     width,
     height,
     scale,
@@ -334,12 +333,25 @@ export function imageToFramePoint(
  * so the result is identical (up to rounding) to a downscaled full-res
  * render, but at a fraction of the pixel work.
  */
+export interface PreviewLayers {
+  background: HTMLCanvasElement;
+  foreground: HTMLCanvasElement;
+  x: number;
+  y: number;
+  scale: number;
+}
+
+const layerCache = new WeakMap<HTMLImageElement, {
+  backgroundKey?: string; background?: HTMLCanvasElement; backgroundImage?: HTMLImageElement | null;
+  frameKey?: string; frame?: HTMLCanvasElement;
+}>();
+
 export function renderFullCanvas(
   screenshotImage: HTMLImageElement,
   settings: EditorSettings,
   padding: { top: number; bottom: number; left: number; right: number },
   bgImage: HTMLImageElement | null,
-  options: { renderEffects?: boolean; maxDimension?: number; outputScale?: number } = { renderEffects: true }
+  options: { renderEffects?: boolean; maxDimension?: number; outputScale?: number; onLayers?: (layers: PreviewLayers) => void } = { renderEffects: true }
 ): HTMLCanvasElement {
   const { top: paddingTop, bottom: paddingBottom, left: paddingLeft, right: paddingRight } = padding;
   const renderEffects = options.renderEffects !== false;
@@ -356,31 +368,27 @@ export function renderFullCanvas(
   const scaledWidth = Math.round(screenshotImage.width * scale);
   const scaledHeight = Math.round(screenshotImage.height * scale);
 
-  const fullExtraX = Math.round(scaledWidth * extraFactor);
-  const fullExtraY = Math.round(scaledHeight * extraFactor);
+  const fullExtraX = Math.round(screenshotImage.width * extraFactor);
+  const fullExtraY = Math.round(screenshotImage.height * extraFactor);
   const fullWidth =
-    scaledWidth + paddingLeft + paddingRight + fullExtraX * 2 + framePad * 2;
+    screenshotImage.width + paddingLeft + paddingRight + fullExtraX * 2 + framePad * 2;
   const fullHeight =
-    scaledHeight + paddingTop + paddingBottom + fullExtraY * 2 + framePad * 2;
+    screenshotImage.height + paddingTop + paddingBottom + fullExtraY * 2 + framePad * 2;
 
   // Uniform output scale: 1 for full-res export, <1 when rendering the live preview.
   const s = options.maxDimension
     ? Math.min(1, options.maxDimension / Math.max(fullWidth, fullHeight))
-    : 1;
+    : (options.outputScale ?? 1);
 
   // Everything below is computed in OUTPUT space (already multiplied by s).
-  const drawW = Math.round(scaledWidth * s);
-  const drawH = Math.round(scaledHeight * s);
-  const extraX = Math.round(drawW * extraFactor);
-  const extraY = Math.round(drawH * extraFactor);
+  const extraX = fullExtraX * s;
+  const extraY = fullExtraY * s;
   const padL = paddingLeft * s;
-  const padR = paddingRight * s;
   const padT = paddingTop * s;
-  const padB = paddingBottom * s;
   const outFramePad = framePad * s;
 
-  const bgWidth = drawW + padL + padR + extraX * 2 + outFramePad * 2;
-  const bgHeight = drawH + padT + padB + extraY * 2 + outFramePad * 2;
+  const bgWidth = fullWidth * s;
+  const bgHeight = fullHeight * s;
 
   const contentPadL = padL + extraX + outFramePad;
   const contentPadT = padT + extraY + outFramePad;
@@ -394,42 +402,34 @@ export function renderFullCanvas(
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
 
-  const totalPadding = padT + padB + padL + padR;
-  if (totalPadding === 0) {
-    ctx.beginPath();
-    ctx.roundRect(0, 0, drawW, drawH, settings.borderRadius * s);
-    ctx.closePath();
-    ctx.clip();
-    ctx.drawImage(screenshotImage, 0, 0, drawW, drawH);
-    applyImageAdjustments(ctx, 0, 0, drawW, drawH, {
-      brightness: settings.brightness ?? 0,
-      contrast: settings.contrast ?? 0,
-      saturation: settings.saturation ?? 0,
-      sharpness: settings.sharpness ?? 0,
-    });
-    return maybeScaleOutput(canvas, options.outputScale);
+  // Keep expensive layers while only position or zoom changes.
+  const cache = options.outputScale === undefined ? layerCache.get(screenshotImage) ?? {} : {};
+  if (options.outputScale === undefined) layerCache.set(screenshotImage, cache);
+  const backgroundKey = JSON.stringify([bgWidth, bgHeight, settings.backgroundType,
+    settings.customColor, settings.gradientId, settings.gradientColors, settings.blurAmount, settings.noiseAmount, renderEffects]);
+  if (cache.backgroundKey !== backgroundKey || cache.backgroundImage !== bgImage) {
+    const plate = document.createElement("canvas");
+    plate.width = bgWidth;
+    plate.height = bgHeight;
+    drawBackground(plate.getContext("2d")!, bgWidth, bgHeight, settings, bgImage);
+    if (renderEffects && settings.blurAmount > 0) applyFastBoxBlur(plate, settings.blurAmount * s);
+    if (renderEffects && settings.noiseAmount > 0) applyNoise(plate, settings.noiseAmount * s);
+    cache.background = plate;
+    cache.backgroundKey = backgroundKey;
+    cache.backgroundImage = bgImage;
   }
+  ctx.drawImage(cache.background!, 0, 0);
 
-  // Background plate
-  const tempCanvas = document.createElement("canvas");
-  tempCanvas.width = bgWidth;
-  tempCanvas.height = bgHeight;
-  const tempCtx = tempCanvas.getContext("2d")!;
-  drawBackground(tempCtx, bgWidth, bgHeight, settings, bgImage);
-
-  // Blur radius / noise amplitude scale with `s` too, so the reduced-resolution
-  // preview still matches what the full-res export looks like when downscaled.
-  if (renderEffects && settings.blurAmount > 0) {
-    applyFastBoxBlur(tempCanvas, settings.blurAmount * s);
+  const frameKey = JSON.stringify([s, scale, settings.showMockup, settings.windowFrame,
+    settings.frameStyle, settings.framePadding, settings.frameOpacity, settings.borderRadius,
+    settings.brightness, settings.contrast, settings.saturation, settings.sharpness]);
+  if (cache.frameKey !== frameKey) {
+    const layer = buildFramedScreenshot(screenshotImage, settings, s);
+    if (!layer) throw new Error("Failed to build framed screenshot");
+    cache.frame = layer;
+    cache.frameKey = frameKey;
   }
-  if (renderEffects && settings.noiseAmount > 0) {
-    applyNoise(tempCanvas, settings.noiseAmount * s);
-  }
-
-  ctx.drawImage(tempCanvas, 0, 0);
-
-  const framed = buildFramedScreenshot(screenshotImage, settings, s);
-  if (!framed) throw new Error("Failed to build framed screenshot");
+  const framed = cache.frame!;
 
   const contentW = framed.width;
   const contentH = framed.height;
@@ -437,54 +437,52 @@ export function renderFullCanvas(
   // Independent position offset (pan) on the background canvas
   const offsetX = (settings.imageOffsetX ?? 0) * s;
   const offsetY = (settings.imageOffsetY ?? 0) * s;
-  const drawX = contentPadL + offsetX;
-  const drawY = contentPadT + offsetY;
+  const drawX = contentPadL + (screenshotImage.width - scaledWidth) * s / 2 + offsetX;
+  const drawY = contentPadT + (screenshotImage.height - scaledHeight) * s / 2 + offsetY;
 
   const layout = getLayoutTransform(layoutId);
   const needsTransform = isLayoutTransformed(layoutId);
 
-  ctx.save();
-  ctx.shadowColor = `rgba(0, 0, 0, ${settings.shadow.opacity / 100})`;
-  ctx.shadowBlur = settings.shadow.blur * s;
-  ctx.shadowOffsetX = settings.shadow.offsetX * s;
-  ctx.shadowOffsetY = settings.shadow.offsetY * s;
+  // Bake chrome, perspective and shadow once; dragging only translates this bitmap.
+  const margin = Math.ceil((settings.shadow.blur * 3 + Math.max(Math.abs(settings.shadow.offsetX), Math.abs(settings.shadow.offsetY))) * s
+    + (needsTransform ? Math.max(contentW, contentH) * 0.25 : 0) + 2);
+  const foreground = options.onLayers ? document.createElement("canvas") : null;
+  if (foreground) {
+    foreground.width = contentW + margin * 2;
+    foreground.height = contentH + margin * 2;
+  }
+  const imageCtx = foreground ? foreground.getContext("2d")! : ctx;
+  const layerX = foreground ? margin : drawX;
+  const layerY = foreground ? margin : drawY;
+
+  imageCtx.save();
+  imageCtx.shadowColor = `rgba(0, 0, 0, ${settings.shadow.opacity / 100})`;
+  imageCtx.shadowBlur = settings.shadow.blur * s;
+  imageCtx.shadowOffsetX = settings.shadow.offsetX * s;
+  imageCtx.shadowOffsetY = settings.shadow.offsetY * s;
 
   if (needsTransform) {
-    const cx = drawX + contentW / 2;
-    const cy = drawY + contentH / 2;
-    ctx.translate(cx, cy);
-    applyLayoutTransform(ctx, layout);
-    ctx.drawImage(framed, -contentW / 2, -contentH / 2);
+    const cx = layerX + contentW / 2;
+    const cy = layerY + contentH / 2;
+    imageCtx.translate(cx, cy);
+    applyLayoutTransform(imageCtx, layout);
+    imageCtx.drawImage(framed, -contentW / 2, -contentH / 2);
   } else {
-    ctx.drawImage(framed, drawX, drawY);
+    imageCtx.drawImage(framed, layerX, layerY);
   }
 
-  ctx.shadowColor = "transparent";
-  ctx.shadowBlur = 0;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 0;
-  ctx.restore();
+  imageCtx.shadowColor = "transparent";
+  imageCtx.shadowBlur = 0;
+  imageCtx.shadowOffsetX = 0;
+  imageCtx.shadowOffsetY = 0;
+  imageCtx.restore();
 
-  return maybeScaleOutput(canvas, options.outputScale);
-}
+  if (foreground) {
+    ctx.drawImage(foreground, drawX - margin, drawY - margin);
+    options.onLayers?.({ background: cache.background!, foreground, x: drawX - margin, y: drawY - margin, scale: s });
+  }
 
-/**
- * Apply the user's export scale (0.5× / 1× / 2×) to a finished composite.
- * Runs AFTER all drawing so internal geometry never has to know about it;
- * annotations are drawn by the caller AFTER this, directly at output size.
- */
-function maybeScaleOutput(canvas: HTMLCanvasElement, outputScale?: number): HTMLCanvasElement {
-  const scale = outputScale ?? 1;
-  if (scale === 1 || canvas.width === 0) return canvas;
-  const out = document.createElement("canvas");
-  out.width = Math.max(1, Math.round(canvas.width * scale));
-  out.height = Math.max(1, Math.round(canvas.height * scale));
-  const octx = out.getContext("2d");
-  if (!octx) return canvas;
-  octx.imageSmoothingEnabled = true;
-  octx.imageSmoothingQuality = scale < 1 ? "high" : "high";
-  octx.drawImage(canvas, 0, 0, out.width, out.height);
-  return out;
+  return canvas;
 }
 
 /**
@@ -810,6 +808,8 @@ export interface PreviewGeneratorOptions {
 
 export interface PreviewGeneratorResult {
   previewUrl: string | null;
+  previewRevision: number;
+  previewLayersRef: React.RefObject<PreviewLayers | null>;
   isGenerating: boolean;
   error: string | null;
   renderHighQualityCanvas: (
@@ -824,13 +824,11 @@ const EFFECTS_IDLE_MS = 200;
 const DRAG_THROTTLE_MS = 34;
 /** Live preview is composited at this max dimension — see renderFullCanvas. */
 const MAX_PREVIEW_DIM = 1400;
-/** During a slider drag the preview drops to this max dimension — render +
- * JPEG-encode cost scales with pixel area, and a slightly softer frame that
+/** During a slider drag the preview drops to this max dimension — rendering
+ * cost scales with pixel area, and a slightly softer frame that
  * tracks the cursor beats a crisp one that stutters. The settle render
- * (effects on, 1400px) restores full detail ~150ms after the drag ends. */
+ * (effects on, 1400px) restores full detail after the drag ends. */
 const DRAG_PREVIEW_DIM = 900;
-/** Slightly softer JPEG during drags for the same reason. */
-const DRAG_JPEG_QUALITY = 0.72;
 const PREVIEW_JPEG_QUALITY = 0.8;
 
 /**
@@ -848,10 +846,11 @@ export function usePreviewGenerator({
   imagePath: _imagePath,
 }: PreviewGeneratorOptions): PreviewGeneratorResult {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewRevision, setPreviewRevision] = useState(0);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const previewUrlRef = useRef<string | null>(null);
+  const previewLayersRef = useRef<PreviewLayers | null>(null);
   const renderIdRef = useRef(0);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const effectsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -887,7 +886,7 @@ export function usePreviewGenerator({
     const canvas = canvasRef.current;
     const shouldRenderEffects = renderEffectsRef.current;
     // Snapshot at render start. Drag frames render at reduced resolution +
-    // quality and skip the isGenerating state flips (two host re-renders of
+    // skip the isGenerating state flips (two host re-renders of
     // the whole editor per frame was pure waste — nothing reads the spinner
     // during a drag); the settle render restores full detail.
     const dragging = useEditorStore.getState()._isDragging;
@@ -910,6 +909,7 @@ export function usePreviewGenerator({
       // hook's last-render closure. The drag loop calls this with the
       // latest pending settings; a closed-over padding value would freeze
       // the preview at whatever padding the drag started with.
+      let layers: PreviewLayers | null = null;
       const rendered = renderFullCanvas(
         screenshotImage,
         settingsToRender,
@@ -921,19 +921,21 @@ export function usePreviewGenerator({
         },
         bgImage,
         {
+          onLayers: (value) => { layers = value; },
           renderEffects: shouldRenderEffects,
           maxDimension: shouldRenderEffects ? MAX_PREVIEW_DIM : DRAG_PREVIEW_DIM,
         }
       );
 
       if (currentRenderId !== renderIdRef.current) return;
+      previewLayersRef.current = layers;
 
       // `rendered` is already at preview resolution (≤ MAX_PREVIEW_DIM) —
       // the composite ran scaled end-to-end (padding, chrome, shadow, and all)
       // instead of rendering full-res and downscaling afterwards. Keeps slider
       // dragging and zooming ultra-smooth at a fraction of the pixel work.
-      canvas.width = rendered.width;
-      canvas.height = rendered.height;
+      if (canvas.width !== rendered.width) canvas.width = rendered.width;
+      if (canvas.height !== rendered.height) canvas.height = rendered.height;
       const ctx = canvas.getContext("2d", { alpha: true });
       if (!ctx) {
         setError("Failed to get canvas context");
@@ -941,19 +943,15 @@ export function usePreviewGenerator({
       }
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = "high";
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(rendered, 0, 0);
 
-      if (previewUrlRef.current) {
-        URL.revokeObjectURL(previewUrlRef.current);
-        previewUrlRef.current = null;
-      }
-      const url = canvas.toDataURL(
-        "image/jpeg",
-        shouldRenderEffects ? PREVIEW_JPEG_QUALITY : DRAG_JPEG_QUALITY
-      );
-      previewUrlRef.current = url;
-      setPreviewUrl(url);
+      // The annotation surface draws this canvas directly. Only serialize a
+      // thumbnail at rest; encoding and decoding JPEG on every drag tick
+      // blocks the same thread that handles slider input.
+      setPreviewRevision((revision) => revision + 1);
       if (!dragging) {
+        setPreviewUrl(canvas.toDataURL("image/jpeg", PREVIEW_JPEG_QUALITY));
         setIsGenerating(false);
       }
     } catch (err) {
@@ -1064,15 +1062,6 @@ export function usePreviewGenerator({
     canvasRef,
     generatePreview,
   ]);
-
-  // Cleanup preview URL on unmount
-  useEffect(() => {
-    return () => {
-      if (previewUrlRef.current) {
-        URL.revokeObjectURL(previewUrlRef.current);
-      }
-    };
-  }, []);
 
   // Drag regen loop — lives in a store subscription on the `_isDragging`
   // edges, NOT in the settings effect above (that effect's cleanup runs on
@@ -1217,6 +1206,8 @@ export function usePreviewGenerator({
 
   return {
     previewUrl,
+    previewRevision,
+    previewLayersRef,
     isGenerating,
     error,
     renderHighQualityCanvas,

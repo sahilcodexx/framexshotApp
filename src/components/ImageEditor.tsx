@@ -1,10 +1,12 @@
+import { estimateExportSeconds, recordExportTiming } from "@/lib/export-timing";
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Store } from "@tauri-apps/plugin-store";
 import { toast } from "sonner";
 import { Loader2, Redo2, Undo2, Crop } from "lucide-react";
 import { TitleBar } from "@/components/TitleBar";
+import { ExportDialog } from "./editor/ExportDialog";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { AnnotationToolbar } from "./editor/AnnotationToolbar";
@@ -27,8 +29,11 @@ import {
 import type { CropRegion } from "@/types/annotations";
 import {
   buildFilenameFromTemplate,
+  exportDimensions,
+  type ExportStage,
   canvasToDataUrl,
   loadExportPrefs,
+  DEFAULT_EXPORT_PREFS,
 } from "@/lib/export-settings";
 import {
   useEditorStore,
@@ -72,14 +77,15 @@ import type { EditorSettings } from "@/stores/editorStore";
 interface ImageEditorProps {
   imagePath: string;
   /** `filename` is the user's template-resolved base name (no extension). */
-  onSave: (editedImageData: string, filename?: string) => void;
+  onSave: (editedImageData: string, filename?: string, clipboardImageData?: string, onProgress?: (stage: ExportStage) => void) => void | Promise<void>;
+  copyToClipboard?: boolean;
   onCancel: () => void;
 }
 
 /** Captures kept in the source-image list before the oldest is dropped. */
 const MAX_SOURCE_CAPTURES = 3;
 
-export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
+export function ImageEditor({ imagePath, onSave, onCancel, copyToClipboard = false }: ImageEditorProps) {
   const backgroundType = useBackgroundType();
   const blurAmount = useBlurAmount();
   const annotations = useAnnotations();
@@ -184,7 +190,16 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
     message: string;
   } | null>(null);
 
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportPrefs, setExportPrefs] = useState(DEFAULT_EXPORT_PREFS);
+  const openExport = useCallback(async () => {
+    setExportPrefs(await loadExportPrefs());
+    setExportOpen(true);
+  }, []);
   const [isSaving, setIsSaving] = useState(false);
+  const [exportEstimate, setExportEstimate] = useState<{ seconds: number; updatedAt: number } | null>(null);
+  const [exportStage, setExportStage] = useState<ExportStage>("rendering");
+  const [exportError, setExportError] = useState<string | null>(null);
   const [isCopying, setIsCopying] = useState(false);
   const [tempDir, setTempDir] = useState<string>("/private/tmp");
 
@@ -212,7 +227,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
     [sourcePath]
   );
 
-  const { previewUrl, error: previewError, renderHighQualityCanvas } = usePreviewGenerator({
+  const { previewUrl, previewRevision, previewLayersRef, error: previewError, renderHighQualityCanvas } = usePreviewGenerator({
     screenshotImage,
     settings,
     canvasRef,
@@ -388,10 +403,9 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
             right: paddingRight,
           })
         : null,
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `settings` is rebuilt every render; the primitive fields below are exactly the inputs getFrameDimensions reads (imageScale, layoutPreset, frameStyle, framePadding, crop + the padding values passed explicitly).
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `settings` is rebuilt every render; the primitive fields below are exactly the inputs getFrameDimensions reads (layoutPreset, frameStyle, framePadding and padding).
     [
       screenshotImage,
-      settings.imageScale,
       settings.layoutPreset,
       settings.frameStyle,
       settings.framePadding,
@@ -497,29 +511,41 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
   const handleSave = useCallback(async () => {
     if (!screenshotImage || isSaving || isCopying) return;
     
+    const started = Date.now();
+    if (frameDimensions) setExportEstimate({ seconds: estimateExportSeconds(frameDimensions.width, frameDimensions.height, exportPrefs), updatedAt: started });
     setIsSaving(true);
+    setExportError(null);
+    setExportStage("rendering");
+    let canvas: HTMLCanvasElement | null = null;
     try {
-      // Scale comes from export prefs so the composite renders at output size.
-      const prefs = await loadExportPrefs();
-      const highQualityCanvas = await renderHighQualityCanvas(annotations, sourcePath, {
-        outputScale: prefs.scale,
-      });
-      
-      if (!highQualityCanvas) {
-        setIsSaving(false);
-        return;
+      const prefs = exportPrefs;
+      if (frameDimensions) exportDimensions(frameDimensions.width, frameDimensions.height, prefs.scale);
+      // Let the progress UI paint before the synchronous base composition.
+      await new Promise<void>((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+      canvas = await renderHighQualityCanvas(annotations, sourcePath, { outputScale: 1 });
+      if (!canvas) throw new Error("Could not render the screenshot. Try a smaller image.");
+      setExportStage("preparing");
+      await new Promise<void>((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+      const encoded = await canvasToDataUrl(canvas, prefs, setExportStage,
+        (seconds) => setExportEstimate({ seconds: seconds + 2, updatedAt: Date.now() }));
+      let clipboardPng: string | undefined;
+      if (copyToClipboard) {
+        clipboardPng = encoded.sourcePng ?? (prefs.format === "png" && prefs.scale === 1 ? encoded.dataUrl
+          : (await canvasToDataUrl(canvas, { ...prefs, format: "png", scale: 1 })).dataUrl);
       }
-
-      // The encoder's actual mime wins — WebKitGTK may fall back to PNG for a
-      // requested type it cannot encode.
-      const { dataUrl } = await canvasToDataUrl(highQualityCanvas, prefs);
-      onSave(dataUrl, buildFilenameFromTemplate(prefs.filenameTemplate));
+      canvas.width = 1;
+      canvas.height = 1;
+      setExportStage("saving");
+      await onSave(encoded.dataUrl, buildFilenameFromTemplate(prefs.filenameTemplate), clipboardPng, setExportStage);
+      if (frameDimensions) recordExportTiming(frameDimensions.width, frameDimensions.height, prefs, (Date.now() - started) / 1000);
+      setExportOpen(false);
     } catch (err) {
-      reportError(`Failed to save: ${err instanceof Error ? err.message : String(err)}`);
+      setExportError(err instanceof Error ? err.message : String(err));
     } finally {
+      if (canvas) { canvas.width = 1; canvas.height = 1; }
       setIsSaving(false);
     }
-  }, [screenshotImage, annotations, renderHighQualityCanvas, onSave, isSaving, isCopying, sourcePath, reportError]);
+  }, [screenshotImage, annotations, renderHighQualityCanvas, onSave, isSaving, isCopying, sourcePath, exportPrefs, frameDimensions, copyToClipboard]);
 
   const handleCopy = useCallback(async () => {
     if (!screenshotImage || isSaving || isCopying) return;
@@ -541,6 +567,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
       
       await invoke<string>("save_edited_image", {
         imageData: dataUrl,
+        onProgress: new Channel<ExportStage>(),
         saveDir: tempDir,
         copyToClip: true,
       });
@@ -596,6 +623,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (exportOpen) return;
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
         return;
       }
@@ -609,10 +637,11 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedAnnotation, handleAnnotationDelete]);
+  }, [selectedAnnotation, handleAnnotationDelete, exportOpen]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (exportOpen) return;
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
         return;
       }
@@ -620,7 +649,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
         if (imageLoaded && !isSaving && !isCopying) {
-          handleSave();
+          void openExport();
         }
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "c" && e.shiftKey) {
@@ -637,18 +666,24 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
         e.preventDefault();
         handleRedo();
       }
-      if (e.key === "Escape") {
+      if (e.key === "Escape" && !exportOpen) {
         onCancel();
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [imageLoaded, isSaving, isCopying, handleSave, handleCopy, handleUndo, handleRedo, onCancel]);
+  }, [imageLoaded, isSaving, isCopying, handleSave, handleCopy, handleUndo, handleRedo, onCancel, openExport, exportOpen]);
 
   return (
     <div className="flex flex-col w-full h-full bg-background text-foreground font-sans select-none">
       <TitleBar />
+      <ExportDialog
+        open={exportOpen} onOpenChange={setExportOpen}
+        prefs={exportPrefs} onPrefsChange={(prefs) => { setExportError(null); setExportPrefs(prefs); }}
+        frameSize={frameDimensions} previewUrl={previewUrl}
+        isSaving={isSaving} estimate={exportEstimate} stage={exportStage} error={exportError} onExport={handleSave}
+      />
 
       <div className="flex flex-1 min-h-0 bg-canvas">
         <div className="flex-1 flex flex-col relative overflow-hidden bg-canvas">
@@ -695,12 +730,14 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
 
           <div className="flex-1 flex items-center justify-center p-4 sm:p-6 md:p-8 lg:p-12 overflow-hidden min-w-0 min-h-0 relative">
             <div className="relative w-full h-full flex items-center justify-center min-w-0 min-h-0 z-10">
-              {previewUrl ? (
+              {previewRevision > 0 ? (
                 <AnnotationCanvas
                   annotations={annotations}
                   selectedAnnotation={selectedAnnotation}
                   selectedTool={selectedTool}
-                  previewUrl={previewUrl}
+                  previewCanvasRef={canvasRef}
+                  previewRevision={previewRevision}
+                  previewLayersRef={previewLayersRef}
                   frameSize={frameDimensions}
                   cropSelection={cropSelectionFrame}
                   imageContentRect={imageContentRect ?? null}
@@ -766,7 +803,7 @@ export function ImageEditor({ imagePath, onSave, onCancel }: ImageEditorProps) {
             </Button>
             <Button
               variant="default"
-              onClick={handleSave}
+              onClick={openExport}
               disabled={!imageLoaded || isSaving || isCopying}
               className="h-8 rounded-full bg-primary text-primary-foreground hover:bg-primary/90 text-xs font-semibold px-5 disabled:opacity-50 shadow-sm"
             >

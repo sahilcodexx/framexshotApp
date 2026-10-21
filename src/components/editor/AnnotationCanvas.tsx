@@ -1,4 +1,6 @@
-import { useRef, useEffect, useState, useCallback, memo } from "react";
+import type { PreviewLayers } from "@/hooks/usePreviewGenerator";
+import { editorActions, useEditorStore } from "@/stores/editorStore";
+import { useRef, useEffect, useCallback, memo } from "react";
 import { Annotation, ToolType, Point, PenAnnotation, CropRegion } from "@/types/annotations";
 import { drawAnnotationOnCanvas } from "@/lib/annotation-utils";
 import { cn } from "@/lib/utils";
@@ -27,7 +29,9 @@ interface AnnotationCanvasProps {
   annotations: Annotation[];
   selectedAnnotation: Annotation | null;
   selectedTool: ToolType;
-  previewUrl: string | null;
+  previewCanvasRef: React.RefObject<HTMLCanvasElement | null>;
+  previewRevision: number;
+  previewLayersRef: React.RefObject<PreviewLayers | null>;
   /**
    * Logical (full-resolution) size of the composed frame. Display sizing uses
    * this instead of the rendered buffer size, so the on-screen canvas keeps a
@@ -265,7 +269,9 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
   annotations,
   selectedAnnotation,
   selectedTool,
-  previewUrl,
+  previewCanvasRef,
+  previewRevision,
+  previewLayersRef,
   frameSize,
   cropSelection = null,
   imageContentRect = null,
@@ -276,9 +282,9 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
   onAnnotationSelect,
   onToolSelect,
 }: AnnotationCanvasProps) {
+  const imageDragRef = useRef<{ start: Point; dx: number; dy: number } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const imageRef = useRef<HTMLImageElement | null>(null);
   const rafRef = useRef<number | null>(null);
   
   // Mutable working copy — never point at Immer-frozen store arrays
@@ -318,8 +324,8 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
   const cropSelectionRef = useRef(cropSelection);
   cropSelectionRef.current = cropSelection;
   
-  // Local state for drag operation - minimal React state for rendering triggers
-  const [imageLoaded, setImageLoaded] = useState(false);
+  // A completed preview can be drawn directly, without loading an encoded image.
+  const imageLoaded = previewRevision > 0;
 
   // Logical (full-resolution) frame size, from the parent. Annotation
   // coordinates and display sizing are expressed in THIS space, so the
@@ -334,28 +340,6 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
   // and multiplied by this so it stays the same physical size on screen no
   // matter how large the logical frame is.
   const uiScaleRef = useRef(1);
-
-  // Load image once and cache it
-  useEffect(() => {
-    if (!previewUrl) {
-      imageRef.current = null;
-      setImageLoaded(false);
-      return;
-    }
-
-    setImageLoaded(false);
-
-    const img = new Image();
-    img.onload = () => {
-      imageRef.current = img;
-      setImageLoaded(true);
-    };
-    img.src = previewUrl;
-
-    return () => {
-      img.onload = null;
-    };
-  }, [previewUrl]);
 
   // Cleanup RAF on unmount
   useEffect(() => {
@@ -931,7 +915,7 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
 
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
-    const img = imageRef.current;
+    const img = previewCanvasRef.current;
     const container = containerRef.current;
     if (!canvas || !img || !imageLoaded || !container) return;
 
@@ -981,7 +965,17 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
 
     ctx.setTransform(frameScale, 0, 0, frameScale, 0, 0);
     ctx.clearRect(0, 0, logicalW, logicalH);
-    ctx.drawImage(img, 0, 0, logicalW, logicalH);
+    const drag = imageDragRef.current;
+    const layers = previewLayersRef.current;
+    if (drag && layers) {
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.drawImage(layers.background, 0, 0);
+      ctx.drawImage(layers.foreground, layers.x + drag.dx * layers.scale, layers.y + drag.dy * layers.scale);
+      ctx.restore();
+    } else {
+      ctx.drawImage(img, 0, 0, logicalW, logicalH);
+    }
 
     const currentAnnotations = annotationsRef.current;
     // Render non-text annotations first
@@ -1035,7 +1029,7 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
         }
       }
     }
-  }, [imageLoaded, selectedAnnotation, selectedTool, drawAnnotation, createAnnotation]);
+  }, [imageLoaded, previewCanvasRef, previewLayersRef, selectedAnnotation, selectedTool, drawAnnotation, createAnnotation]);
 
   // Publish the latest redraw for the frame-coalescing crop scheduler. Assigned
   // during render (like the other *_ref.current = prop mirrors in this file) so
@@ -1053,7 +1047,7 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
 
   useEffect(() => {
     redraw();
-  }, [redraw]);
+  }, [redraw, previewRevision]);
 
   // Sync from props only when not mid-drag/resize/draw (prevents snap-back + frozen mutations).
   // Also redraw so undo/redo and external annotation updates paint immediately.
@@ -1210,6 +1204,10 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
 
     if (selectedTool === "select" || !selectedTool) {
       onAnnotationSelect(null);
+      const rect = imageRectRef.current;
+      if (rect && point.x >= rect.x && point.x <= rect.x + rect.width && point.y >= rect.y && point.y <= rect.y + rect.height) {
+        if (previewLayersRef.current) imageDragRef.current = { start: point, dx: 0, dy: 0 };
+      }
     } else {
       ds.isDrawing = true;
       ds.startPoint = point;
@@ -1382,6 +1380,20 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
     const canvas = canvasRef.current;
     const ds = dragStateRef.current;
 
+    const imageDrag = imageDragRef.current;
+    if (imageDrag) {
+      imageDrag.dx = point.x - imageDrag.start.x;
+      imageDrag.dy = point.y - imageDrag.start.y;
+      if (rafRef.current === null) {
+        rafRef.current = requestAnimationFrame(() => {
+          rafRef.current = null;
+          redraw();
+        });
+      }
+      if (canvas) canvas.style.cursor = "grabbing";
+      return;
+    }
+
     // Crop drag: redraw only, never touch annotations or the store. The
     // overlay is drawn from ds.cropAnchor/cropCurrent so the rect tracks the
     // cursor without a React render per pointermove.
@@ -1505,7 +1517,7 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
       const hovered = [...annotationsRef.current]
         .reverse()
         .find((ann) => isPointInAnnotation(point, ann));
-      canvas.style.cursor = hovered ? "move" : "default";
+      canvas.style.cursor = hovered ? "move" : "grab";
       if (ds.hoveredHandleId !== null) {
         ds.hoveredHandleId = null;
         redraw();
@@ -1517,6 +1529,15 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
   }, [getCanvasCoordinates, selectedTool, selectedAnnotation, applyResize, getHandleAtPoint, isPointInAnnotation, getCursorForHandle, redraw]);
 
   const handleMouseUp = () => {
+    if (imageDragRef.current) {
+      const start = imageDragRef.current;
+      imageDragRef.current = null;
+      if (canvasRef.current) canvasRef.current.style.cursor = "grab";
+      const { imageOffsetX, imageOffsetY } = useEditorStore.getState().settings;
+      if (start.dx !== 0 || start.dy !== 0) {
+        editorActions.setImageOffset(imageOffsetX + start.dx, imageOffsetY + start.dy);
+      }
+    }
     if (rafRef.current) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
@@ -1674,7 +1695,7 @@ export const AnnotationCanvas = memo(function AnnotationCanvas({
     }
   };
 
-  if (!previewUrl) {
+  if (!imageLoaded) {
     return null;
   }
 

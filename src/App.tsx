@@ -2,12 +2,12 @@ import { editorActions } from "@/stores/editorStore";
 import { Switch } from "@/components/ui/switch";
 import { isAssetId, isDataUrl, migrateStoredValue } from "@/lib/asset-registry";
 import { processScreenshotWithDefaultBackground } from "@/lib/auto-process";
-import { buildExportFilename } from "@/lib/export-settings";
+import { buildExportFilename, type ExportStage } from "@/lib/export-settings";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
 import { isMac, isWindows } from "@/lib/platform";
 import { eventMatchesShortcut, isTypingTarget } from "@/lib/shortcut";
 import { cn } from "@/lib/utils";
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   availableMonitors,
@@ -34,7 +34,7 @@ type CaptureMode = "region" | "fullscreen" | "window" | "ocr";
 // Loading fallback for lazy loaded components
 function LoadingFallback() {
   return (
-    <div className="h-full flex items-center justify-center bg-canvas">
+    <div className="w-full h-full flex-1 flex items-center justify-center bg-canvas">
       <div className="flex items-center gap-2 text-muted-foreground">
         <svg className="animate-spin size-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
           <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
@@ -545,6 +545,7 @@ function App() {
 
               const savedPath = await invoke<string>("save_edited_image", {
                 imageData: processedImageData,
+                onProgress: new Channel<ExportStage>(),
                 saveDir: currentSaveDir,
                 copyToClip: shouldCopyToClipboard,
                 filename: await buildExportFilename(),
@@ -623,6 +624,7 @@ function App() {
 
           const savedPath = await invoke<string>("save_edited_image", {
             imageData: processedImageData,
+            onProgress: new Channel<ExportStage>(),
             saveDir: currentSaveDir,
             copyToClip: shouldCopyToClipboard,
             filename: await buildExportFilename(),
@@ -940,6 +942,7 @@ function App() {
               const processedImageData = await processScreenshotWithDefaultBackground(croppedPath);
               const savedPath = await invoke<string>("save_edited_image", {
                 imageData: processedImageData,
+                onProgress: new Channel<ExportStage>(),
                 saveDir: currentSaveDir,
                 copyToClip: shouldCopyToClipboard,
                 filename: await buildExportFilename(),
@@ -1028,10 +1031,14 @@ function App() {
     setMode("main");
   }, [loadSettings]);
 
-  async function handleEditorSave(editedImageData: string, filename?: string) {
+  async function handleEditorSave(editedImageData: string, filename?: string, clipboardImageData?: string, onProgress?: (stage: ExportStage) => void) {
     try {
+      const progress = new Channel<ExportStage>();
+      progress.onmessage = (stage) => onProgress?.(stage);
       const savedPath = await invoke<string>("save_edited_image", {
         imageData: editedImageData,
+        clipboardImageData,
+        onProgress: progress,
         saveDir,
         copyToClip: copyToClipboard,
         filename,
@@ -1052,8 +1059,7 @@ function App() {
         description: errorMessage,
         duration: 5000,
       });
-      editorActions.reset();
-      setMode("main");
+      throw err;
     }
   }
 
@@ -1083,6 +1089,7 @@ function App() {
             <ImageEditor
               imagePath={tempScreenshotPath}
               onSave={handleEditorSave}
+              copyToClipboard={copyToClipboard}
               onCancel={handleEditorCancel}
             />
           </Suspense>
