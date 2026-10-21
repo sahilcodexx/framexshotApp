@@ -1,5 +1,15 @@
 import "@testing-library/jest-dom/vitest";
-import { vi } from "vitest";
+import { beforeEach, vi } from "vitest";
+
+beforeEach(() => {
+  const values = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value); },
+    removeItem: (key: string) => { values.delete(key); },
+    clear: () => values.clear(),
+  });
+});
 
 // Mock Tauri APIs
 vi.mock("@tauri-apps/plugin-store", () => ({
@@ -14,6 +24,7 @@ vi.mock("@tauri-apps/plugin-store", () => ({
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
+  Channel: class { onmessage: (message: unknown) => void = () => {}; },
   convertFileSrc: vi.fn((path: string) => `asset://${path}`),
 }));
 
